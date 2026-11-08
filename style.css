@@ -1,0 +1,43 @@
+body {
+  background-color: #faf9f7;
+  color: #1a1c1b;
+  font-family: 'Hanken Grotesk', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.font-syne {
+  font-family: 'Syne', sans-serif;
+}
+
+.grid-fine {
+  background-size: 40px 40px;
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.035) 1px, transparent 1px);
+}
+
+.editorial-border {
+  border: 1px solid #e5e3df;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@keyframes pulseLine {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.agent-node {
+  cursor: pointer;
+  user-select: none;
+}
+

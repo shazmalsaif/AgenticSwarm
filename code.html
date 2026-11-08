@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html class="light" lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <title>AgentSwarm — Autonomous AI Browser Testing &amp; Self-Healing Architecture</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com" rel="preconnect">
+  <link href="https://fonts.gstatic.com" rel="preconnect" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Syne:wght@600;700;800&amp;display=swap"
+    rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "surface": "#faf9f7",
+            "surface-bright": "#faf9f7",
+            "surface-dim": "#dadad8",
+            "surface-container-lowest": "#ffffff",
+            "surface-container-low": "#f4f3f1",
+            "surface-container": "#efeeec",
+            "surface-container-high": "#e9e8e6",
+            "surface-container-highest": "#e3e2e0",
+            "primary": "#000000",
+            "primary-container": "#1b1b1b",
+            "on-primary": "#ffffff",
+            "on-surface": "#1a1c1b",
+            "on-surface-variant": "#5a5c63",
+            "outline": "#7e7576",
+            "outline-variant": "#e2e0dc",
+            "border-hairline": "#e5e3df",
+            "secondary": "#515f74",
+            "accent-green": "#16a34a",
+            "accent-red": "#dc2626"
+          },
+          fontFamily: {
+            display: ['Syne', 'sans-serif'],
+            sans: ['Hanken Grotesk', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace']
+          },
+          borderRadius: {
+            'DEFAULT': '0.125rem',
+            'lg': '0.25rem',
+            'xl': '0.375rem',
+            '2xl': '0.5rem',
+            'full': '0.75rem'
+          },
+          boxShadow: {
+            'subtle': '0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px 0 rgba(0, 0, 0, 0.02)',
+            'card': '0 4px 20px -2px rgba(14, 15, 18, 0.05)',
+            'elevation': '0 20px 40px -15px rgba(14, 15, 18, 0.08)'
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #faf9f7;
+      color: #1a1c1b;
+      font-family: 'Hanken Grotesk', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .font-syne {
+      font-family: 'Syne', sans-serif;
+    }
+
+    .grid-fine {
+      background-size: 40px 40px;
+      background-image:
+        linear-gradient(to right, rgba(0, 0, 0, 0.035) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 0, 0, 0.035) 1px, transparent 1px);
+    }
+
+    .editorial-border {
+      border: 1px solid #e5e3df;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @keyframes pulseLine {
+
+      0%,
+      100% {
+        opacity: 0.4;
+      }
+
+      50% {
+        opacity: 1;
+      }
+    }
+
+    .agent-node {
+      cursor: pointer;
+      user-select: none;
+    }
+  </style>
+</head>
+
+<body class="min-h-screen relative flex flex-col selection:bg-black selection:text-white">
+  <!-- Top Announcement Bar -->
+  <div
+    class="w-full bg-[#f4f3f1] border-b border-border-hairline py-2 px-4 text-center text-xs font-mono text-on-surface-variant flex items-center justify-center gap-3">
+    <span class="inline-flex items-center gap-1.5 font-medium text-black whitespace-nowrap">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+      AgentSwarm Engine v2.4
+    </span>
+    <span class="text-zinc-300 hidden sm:inline">/</span>
+    <span class="hidden sm:inline">Autonomous DOM Graph Traversal &amp; Self-Healing Locators</span>
+    <a class="text-black font-semibold hover:underline inline-flex items-center gap-1 ml-1 whitespace-nowrap"
+      href="#self-healing" id="btn-read-paper">
+      Read Technical Paper <i class="fa-solid fa-arrow-right text-[9px]"></i>
+    </a>
+  </div>
+  <!-- Navigation Bar: Minimalist frosted bar -->
+  <header class="sticky top-0 z-50 w-full backdrop-blur-md bg-[#faf9f7]/90 border-b border-border-hairline">
+    <div class="max-w-[1140px] mx-auto px-6 h-16 flex items-center justify-between">
+      <!-- Left: Logo -->
+      <a class="flex items-center gap-3" href="#">
+        <div class="w-7 h-7 bg-black rounded-lg flex items-center justify-center text-white">
+          <i class="fa-solid fa-diagram-project text-xs"></i>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-base font-bold font-syne tracking-tight text-black">AgentSwarm</span>
+          <span
+            class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-surface-container border border-border-hairline text-neutral-600 whitespace-nowrap">ENTERPRISE</span>
+        </div>
+      </a>
+      <!-- Center: Nav links -->
+      <nav class="hidden md:flex items-center gap-8 text-xs font-mono tracking-tight text-on-surface-variant">
+        <a class="hover:text-black transition-colors whitespace-nowrap" href="#platform">Platform</a>
+        <a class="hover:text-black transition-colors whitespace-nowrap" href="#how-it-works">Architecture</a>
+        <a class="hover:text-black transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+          href="#orchestrator" id="nav-launch-swarm"><span>Launch Your Swarm</span>
+          <i class="fa-solid fa-arrow-right text-[10px]"></i></a>
+        <a class="hover:text-black transition-colors whitespace-nowrap" href="#self-healing">Self-Healing</a>
+        <a class="hover:text-black transition-colors whitespace-nowrap" href="#security">Security</a>
+      </nav>
+      <!-- Right: Action buttons -->
+      <div class="flex items-center gap-3">
+        <button
+          class="hidden sm:inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-neutral-300 bg-white hover:border-black text-xs font-mono font-semibold text-black shadow-subtle hover:bg-neutral-50 transition-all whitespace-nowrap"
+          id="btn-signin" type="button">
+          <i class="fa-regular fa-user text-[11px] text-neutral-600"></i>
+          <span>Sign In</span>
+        </button>
+        <a class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-black text-white text-xs font-mono font-medium hover:bg-neutral-800 transition-all whitespace-nowrap shadow-subtle"
+          href="#cta" id="btn-header-workspace">
+          <span>Launch Workspace</span>
+          <i class="fa-solid fa-arrow-right text-[9px]"></i>
+        </a>
+      </div>
+    </div>
+  </header>
+  <!-- Hero Section -->
+  <section
+    class="relative z-10 pt-20 pb-20 md:pt-28 md:pb-28 px-6 max-w-[1140px] mx-auto flex flex-col items-center text-center">
+    <!-- Restrained Pill Badge -->
+    <div
+      class="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-full bg-white border border-border-hairline shadow-subtle text-neutral-700 text-[11px] font-mono mb-8 whitespace-nowrap">
+      <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+      <span class="font-medium tracking-wide">AUTONOMOUS QA PLATFORM</span>
+    </div>
+    <!-- Main Headline: Editorial Typography -->
+    <h1
+      class="font-syne text-4xl sm:text-6xl lg:text-[72px] font-extrabold tracking-tight text-black max-w-4xl leading-[1.06] mb-8">
+      Let AI break it <br class="hidden sm:inline">
+      <span class="italic font-normal font-sans text-neutral-500">before users do.</span>
+    </h1>
+    <!-- Supporting Text -->
+    <p class="text-lg sm:text-xl font-normal leading-relaxed text-[#57534e] max-w-2xl mx-auto mb-10 tracking-normal">
+      Deploy intelligent AI agents to explore your application, uncover hidden bugs, and test critical user journeys
+      autonomously. When UI changes break your tests, AgentSwarm diagnoses the failure, suggests intelligent repairs,
+      and verifies the fix—helping your team ship with confidence.</p>
+    <!-- CTAs -->
+    <div class="flex flex-col sm:flex-row items-center gap-3.5 w-full sm:w-auto mb-16">
+      <a class="w-full sm:w-auto px-7 py-3 rounded-lg bg-black text-white font-medium text-xs font-mono tracking-tight hover:bg-neutral-800 transition-all flex items-center justify-center gap-2 shadow-subtle"
+        href="#orchestrator" id="btn-hero-launch"><span>Launch Your Swarm</span>
+        <i class="fa-solid fa-arrow-right text-[10px]"></i></a>
+      <a class="w-full sm:w-auto px-6 py-3 rounded-lg bg-white border border-border-hairline hover:bg-surface-container-low text-black font-medium text-xs font-mono tracking-tight transition-all flex items-center justify-center gap-2 shadow-subtle"
+        href="#orchestrator" id="btn-watch-demo"><i
+          class="fa-solid fa-play text-[10px] text-neutral-500"></i><span>Watch Product Demo</span></a>
+    </div>
+    <!-- Enterprise Social Proof Grid -->
+    <div class="w-full pt-10 border-t border-border-hairline flex flex-col items-center">
+      <p class="text-[11px] font-mono tracking-wider text-neutral-400 uppercase mb-6">Trusted by Quality Engineering
+        Teams at Scale</p>
+      <div
+        class="flex flex-wrap items-center justify-center gap-8 sm:gap-14 opacity-60 grayscale hover:grayscale-0 transition-all duration-300">
+        <div class="flex items-center gap-2 font-syne font-bold text-sm tracking-tighter text-black">
+          <i class="fa-solid fa-cube text-xs"></i> DATAPULSE
+        </div>
+        <div class="flex items-center gap-2 font-syne font-bold text-sm tracking-tighter text-black">
+          <i class="fa-solid fa-layer-group text-xs"></i> NEXUSPAY
+        </div>
+        <div class="flex items-center gap-2 font-syne font-bold text-sm tracking-tighter text-black">
+          <i class="fa-solid fa-shapes text-xs"></i> STRATOS.IO
+        </div>
+        <div class="flex items-center gap-2 font-syne font-bold text-sm tracking-tighter text-black">
+          <i class="fa-solid fa-shield-halved text-xs"></i> VERIX CLOUD
+        </div>
+        <div class="flex items-center gap-2 font-syne font-bold text-sm tracking-tighter text-black">
+          <i class="fa-solid fa-compass-drafting text-xs"></i> MONOLITH LABS
+        </div>
+      </div>
+    </div>
+    <!-- ORCHESTRATOR & LIVE SWARM ARCHITECTURAL STAGE -->
+    <div class="w-full mt-20 text-left" id="orchestrator">
+      <div class="rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
+        <!-- System Control Header Bar -->
+        <div
+          class="bg-[#f4f3f1] px-5 py-3.5 border-b border-border-hairline flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono">
+          <div class="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+            <span
+              class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white border border-border-hairline text-neutral-800 font-semibold whitespace-nowrap"
+              id="cluster-status-badge">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" id="cluster-status-dot"></span>
+              <span id="cluster-status-text">CLUSTER ONLINE</span>
+            </span>
+            <span class="text-neutral-400 hidden sm:inline">|</span>
+            <form class="inline-flex items-center gap-1.5 text-neutral-600" id="swarm-target-form">
+              <label class="whitespace-nowrap" for="target-url-input">Target:</label>
+              <input aria-label="Staging URL to test"
+                class="bg-white px-2 py-0.5 rounded border border-border-hairline text-black font-medium text-xs font-mono focus:outline-none focus:border-black transition-colors w-52 sm:w-64"
+                id="target-url-input" type="url" value="https://staging.store.nexus">
+              <button
+                class="px-2.5 py-0.5 rounded bg-black text-white text-[11px] font-mono font-medium hover:bg-neutral-800 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                id="btn-deploy-swarm" title="Deploy synthetic agent swarm to target URL" type="submit">
+                <i class="fa-solid fa-bolt text-[9px]"></i>
+                <span id="btn-deploy-swarm-label">Deploy Swarm</span>
+              </button>
+            </form>
+          </div>
+          <div class="flex items-center gap-3 text-neutral-500 whitespace-nowrap">
+            <span class="text-neutral-700 font-medium" id="agents-dispatched-count">5 Agents Dispatched</span>
+            <span>•</span>
+            <span id="parallel-workers-count">Parallel Workers: 32</span>
+          </div>
+        </div>
+        <!-- Architecture Flow Canvas -->
+        <div class="p-8 sm:p-12 bg-[#faf9f7] grid-fine relative">
+          <!-- Central Orchestrator Block -->
+          <div class="flex flex-col items-center justify-center mb-10">
+            <div
+              class="w-full max-w-xs bg-white rounded-lg border border-border-hairline p-4 shadow-subtle text-center relative z-10">
+              <div class="w-9 h-9 rounded bg-black text-white flex items-center justify-center mx-auto mb-2.5">
+                <i class="fa-solid fa-microchip text-sm" id="orchestrator-core-icon"></i>
+              </div>
+              <h3 class="font-syne font-bold text-sm text-black uppercase tracking-wide">Swarm Orchestration Core</h3>
+              <p class="text-[11px] font-mono text-on-surface-variant mt-1" id="orchestrator-subtitle">Autonomous Task
+                Scheduling &amp; State Sync</p>
+              <div
+                class="mt-3 pt-2.5 border-t border-border-hairline flex items-center justify-between text-[10px] font-mono text-neutral-500">
+                <span id="cpu-load-display">CPU Load: 34%</span>
+                <span class="text-emerald-700 font-medium" id="sync-status-display">Synced • Active</span>
+              </div>
+            </div>
+            <!-- Connection Line -->
+            <div class="w-px h-8 bg-neutral-300"></div>
+            <div class="w-full max-w-4xl h-px bg-neutral-300 relative">
+              <div class=" conn-dot absolute left-0 -top-1 w-2 h-2 rounded-full bg-neutral-400 transition-all"
+                data-dot="0"></div>
+              <div class="conn-dot absolute left-1/4 -top-1 w-2 h-2 rounded-full bg-black transition-all" data-dot="1">
+              </div>
+              <div
+                class="conn-dot absolute left-1/2 -top-1 -translate-x-1/2 w-2 h-2 rounded-full bg-neutral-400 transition-all"
+                data-dot="2"></div>
+              <div class="conn-dot absolute right-1/4 -top-1 w-2 h-2 rounded-full bg-neutral-400 transition-all"
+                data-dot="3"></div>
+              <div class="conn-dot absolute right-0 -top-1 w-2 h-2 rounded-full bg-neutral-400 transition-all"
+                data-dot="4"></div>
+            </div>
+          </div>
+          <!-- 5 Specialized Agent Nodes -->
+          <div class="grid grid-cols-1 sm:grid-cols-5 gap-3.5 relative z-10" id="agent-nodes-grid">
+            <!-- Node 1: Explorer Agent -->
+            <div
+              class="agent-node bg-white p-4 rounded-lg border border-border-hairline shadow-subtle hover:border-black transition-all"
+              data-agent-index="0" role="button" tabindex="0">
+              <div class="flex items-center justify-between mb-3">
+                <span
+                  class="node-num w-7 h-7 rounded bg-surface-container flex items-center justify-center text-black text-xs font-mono">
+                  01
+                </span>
+                <span
+                  class="node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-surface-container text-neutral-700">EXPLORING</span>
+              </div>
+              <h4 class="text-xs font-bold font-syne text-black">Explorer Agent</h4>
+              <p class="node-desc text-[11px] text-on-surface-variant mt-1.5 leading-snug">Autonomous crawling of 24
+                unmapped routes.</p>
+            </div>
+            <!-- Node 2: Workflow Agent -->
+            <div class="agent-node bg-white p-4 rounded-lg border-2 border-black shadow-subtle transition-all"
+              data-agent-index="1" role="button" tabindex="0">
+              <div class="flex items-center justify-between mb-3">
+                <span
+                  class="node-num w-7 h-7 rounded bg-black flex items-center justify-center text-white text-xs font-mono">
+                  02
+                </span>
+                <span
+                  class="node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-black text-white font-medium">DISPATCHED</span>
+              </div>
+              <h4 class="text-xs font-bold font-syne text-black">Workflow Agent</h4>
+              <p class="node-desc text-[11px] text-on-surface-variant mt-1.5 leading-snug">Simulating multi-stage
+                checkout &amp; payment token.</p>
+            </div>
+            <!-- Node 3: Diagnosis Agent -->
+            <div
+              class="agent-node bg-white p-4 rounded-lg border border-border-hairline shadow-subtle hover:border-black transition-all"
+              data-agent-index="2" role="button" tabindex="0">
+              <div class="flex items-center justify-between mb-3">
+                <span
+                  class="node-num w-7 h-7 rounded bg-surface-container flex items-center justify-center text-black text-xs font-mono">
+                  03
+                </span>
+                <span
+                  class="node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-surface-container text-neutral-700">ANALYZING</span>
+              </div>
+              <h4 class="text-xs font-bold font-syne text-black">Diagnosis Agent</h4>
+              <p class="node-desc text-[11px] text-on-surface-variant mt-1.5 leading-snug">Triaging GraphQL mutations
+                &amp; DOM anomalies.</p>
+            </div>
+            <!-- Node 4: Healing Agent -->
+            <div
+              class="agent-node bg-white p-4 rounded-lg border border-border-hairline shadow-subtle hover:border-black transition-all"
+              data-agent-index="3" role="button" tabindex="0">
+              <div class="flex items-center justify-between mb-3">
+                <span
+                  class="node-num w-7 h-7 rounded bg-emerald-50 text-emerald-800 flex items-center justify-center text-xs font-mono font-bold">
+                  04
+                </span>
+                <span
+                  class="node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium">HEALED</span>
+              </div>
+              <h4 class="text-xs font-bold font-syne text-black">Healing Agent</h4>
+              <p class="node-desc text-[11px] text-on-surface-variant mt-1.5 leading-snug">Synthesizing ARIA-resilient
+                locators.</p>
+            </div>
+            <!-- Node 5: Verification Agent -->
+            <div
+              class="agent-node bg-white p-4 rounded-lg border border-border-hairline shadow-subtle hover:border-black transition-all"
+              data-agent-index="4" role="button" tabindex="0">
+              <div class="flex items-center justify-between mb-3">
+                <span
+                  class="node-num w-7 h-7 rounded bg-surface-container flex items-center justify-center text-black text-xs font-mono">
+                  05
+                </span>
+                <span
+                  class="node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-surface-container text-neutral-700">VERIFY</span>
+              </div>
+              <h4 class="text-xs font-bold font-syne text-black">Verification Agent</h4>
+              <p class="node-desc text-[11px] text-on-surface-variant mt-1.5 leading-snug">Regression validation in
+                sandbox runner.</p>
+            </div>
+          </div>
+          <!-- Live Session & Code Inspector Preview -->
+          <div class="mt-8 rounded-lg border border-border-hairline bg-white shadow-subtle overflow-hidden">
+            <!-- Inspector Chrome Header -->
+            <div
+              class="h-10 bg-[#f4f3f1] px-4 flex items-center justify-between border-b border-border-hairline text-xs font-mono">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-neutral-300"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-neutral-300"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-neutral-300"></span>
+                <span class="ml-2 text-neutral-500 font-sans text-[11px] whitespace-nowrap"
+                  id="inspector-session-title">Playwright Headless Session #402</span>
+              </div>
+              <div
+                class="flex items-center gap-2 bg-white px-3 py-1 rounded border border-border-hairline text-neutral-700 text-[11px]">
+                <i class="fa-solid fa-lock text-[9px] text-emerald-600"></i>
+                <span class="truncate max-w-[180px] sm:max-w-[280px]"
+                  id="inspector-url-display">https://staging.store.nexus/checkout</span>
+                <span class="ml-2 text-[10px] font-bold text-emerald-700 whitespace-nowrap"
+                  id="inspector-http-status">200 OK</span>
+              </div>
+              <div class="text-[11px] text-neutral-500 hidden sm:block whitespace-nowrap" id="inspector-step-label">
+                Workflow Agent: Interactive Step 4 of 6
+              </div>
+            </div>
+            <!-- Inspector Body Split -->
+            <div
+              class="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-border-hairline bg-[#ffffff]">
+              <!-- Left: Target UI Simulation -->
+              <div class="lg:col-span-7 p-6 sm:p-8 space-y-4">
+                <div class="flex items-center justify-between">
+                  <span class="text-[11px] font-mono uppercase tracking-wider text-neutral-500">Document Object Model Target</span>
+                  <span
+                    class="text-[11px] font-mono px-2 py-0.5 rounded bg-surface-container text-neutral-700 whitespace-nowrap"
+                    id="dom-state-badge">State: Interactive</span>
+                </div>
+                <div>
+                  <h4 class="text-xl font-bold font-syne text-black" id="dom-product-title">Enterprise Precision Laptop
+                    (M4 Pro)</h4>
+                  <p class="text-xs text-on-surface-variant font-mono mt-0.5" id="dom-product-meta">SKU: PROD-9941 •
+                    Cart ID: CT-08912</p>
+                </div>
+                <div class="text-2xl font-bold font-syne text-black"><span id="dom-product-price">$1,499.00</span> <span
+                    class="text-xs font-normal text-neutral-500 font-sans" id="dom-product-env">USD (Staging
+                    Sandbox)</span></div>
+                <div class="pt-2 flex flex-wrap items-center gap-3">
+                  <div class="p-1 rounded-lg border border-black inline-block bg-neutral-50 transition-all"
+                    id="dom-cta-wrapper">
+                    <button
+                      class="px-6 py-2.5 bg-black text-white text-xs font-mono font-medium rounded flex items-center gap-2 hover:bg-neutral-800 transition-all"
+                      id="btn-dom-target-cta" type="button">
+                      <i class="fa-solid fa-cart-shopping text-[10px]" id="dom-cta-icon"></i>
+                      <span id="dom-cta-text">Add to Cart &amp; Proceed</span>
+                    </button>
+                  </div>
+                  <div
+                    class="inline-flex items-center gap-2 text-[11px] font-mono text-neutral-600 bg-surface-container px-2.5 py-1.5 rounded transition-all"
+                    id="synthetic-action-pill">
+                    <i class="fa-solid fa-arrow-pointer text-xs" id="synthetic-action-icon"></i>
+                    <span id="synthetic-action-text">Agent Synthetic Click Registered</span>
+                  </div>
+                </div>
+              </div>
+              <!-- Right: Real-time Self-Healing Diff Pill -->
+              <div class="lg:col-span-5 p-6 bg-[#faf9f7] font-mono text-xs">
+                <div class="flex items-center justify-between pb-3 border-b border-border-hairline gap-2">
+                  <span class="text-[11px] font-semibold text-black flex items-center gap-1.5 whitespace-nowrap"
+                    id="healing-event-title">
+                    <i class="fa-solid fa-circle-check text-emerald-600" id="healing-event-icon"></i> <span
+                      id="healing-event-label">Self-Healing Event</span>
+                  </span>
+                  <span
+                    class="text-[10px] text-neutral-600 bg-white px-2 py-0.5 rounded border border-border-hairline whitespace-nowrap"
+                    id="healing-confidence-badge">Confidence: 99.4%</span>
+                </div>
+                <div class="mt-4 space-y-2.5">
+                  <div class="p-2.5 rounded bg-red-50/60 border border-red-200/80 text-red-900">
+                    <div class="text-[10px] text-red-600 font-semibold mb-1" id="diff-failed-label">- Brittle Legacy
+                      Selector (Failed)</div>
+                    <code class="text-[11px] break-all" id="diff-failed-code">page.locator('#checkout_btn_v1');</code>
+                  </div>
+                  <div class="p-2.5 rounded bg-emerald-50/60 border border-emerald-200/80 text-emerald-950">
+                    <div class="text-[10px] text-emerald-700 font-semibold mb-1" id="diff-healed-label">+ Resilient ARIA
+                      Healed Locator</div>
+                    <code class="text-[11px] break-all"
+                      id="diff-healed-code">page.getByRole('button', { name: /proceed/i });</code>
+                  </div>
+                </div>
+                <div
+                  class="mt-5 pt-3 border-t border-border-hairline text-[11px] text-neutral-500 flex items-center justify-between">
+                  <span id="healing-retest-time">Re-test: Passed in 0.38s</span>
+                  <a class="text-black font-semibold hover:underline" href="#self-healing" id="healing-pr-status">PR
+                    Automated</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- Platform Overview: 4 Core Feature Cards -->
+  <section class="py-24 px-6 max-w-[1140px] mx-auto w-full relative z-10 border-t border-border-hairline" id="platform">
+    <div class="max-w-2xl mb-16 text-left">
+      <span class="text-xs font-mono uppercase tracking-widest text-neutral-500">Core Capabilities</span>
+      <h2 class="font-syne text-3xl sm:text-4xl font-bold text-black tracking-tight mt-3 mb-4">
+        Your entire QA pipeline. Fully autonomous.
+      </h2>
+      <p class="text-on-surface-variant text-sm sm:text-base leading-relaxed">
+        Engineered for high-velocity software engineering organizations. Replace brittle test suites and manual QA
+        cycles with resilient, intelligent agents.
+      </p>
+    </div>
+    <!-- 4 Cards Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <!-- Card 1 -->
+      <div
+        class="capability-card cursor-pointer bg-white p-7 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors flex flex-col justify-between"
+        data-target-agent="0">
+        <div>
+          <div
+            class="w-10 h-10 rounded bg-[#f4f3f1] border border-border-hairline flex items-center justify-center text-black text-sm mb-6">
+            <i class="fa-solid fa-compass"></i>
+          </div>
+          <h3 class="text-base font-bold font-syne text-black mb-2.5">Autonomous Exploration</h3>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Crawls unmapped staging routes, catalogs dynamic DOM trees, and identifies unhandled state boundaries
+            without requiring pre-written scripts.
+          </p>
+        </div>
+        <div
+          class="pt-6 mt-6 border-t border-border-hairline flex items-center justify-between text-xs font-mono text-black font-medium">
+          <span>Explore Engine</span>
+          <i class="fa-solid fa-arrow-right text-[10px]"></i>
+        </div>
+      </div>
+      <!-- Card 2 -->
+      <div
+        class="capability-card cursor-pointer bg-white p-7 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors flex flex-col justify-between"
+        data-target-agent="1">
+        <div>
+          <div
+            class="w-10 h-10 rounded bg-[#f4f3f1] border border-border-hairline flex items-center justify-center text-black text-sm mb-6">
+            <i class="fa-solid fa-bolt"></i>
+          </div>
+          <h3 class="text-base font-bold font-syne text-black mb-2.5">Intelligent Testing</h3>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Simulates genuine human behaviors—including complex multi-stage forms, payment checkouts, session storage
+            manipulation, and auth tokens.
+          </p>
+        </div>
+        <div
+          class="pt-6 mt-6 border-t border-border-hairline flex items-center justify-between text-xs font-mono text-black font-medium">
+          <span>Workflow Synth</span>
+          <i class="fa-solid fa-arrow-right text-[10px]"></i>
+        </div>
+      </div>
+      <!-- Card 3 -->
+      <div
+        class="capability-card cursor-pointer bg-white p-7 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors flex flex-col justify-between"
+        data-target-agent="2">
+        <div>
+          <div
+            class="w-10 h-10 rounded bg-[#f4f3f1] border border-border-hairline flex items-center justify-center text-black text-sm mb-6">
+            <i class="fa-solid fa-stethoscope"></i>
+          </div>
+          <h3 class="text-base font-bold font-syne text-black mb-2.5">Smart Failure Diagnosis</h3>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Isolates actual backend API regression failures from trivial DOM selector changes. Eliminates flakiness and
+            noisy false positive test alerts.
+          </p>
+        </div>
+        <div
+          class="pt-6 mt-6 border-t border-border-hairline flex items-center justify-between text-xs font-mono text-black font-medium">
+          <span>Root Cause Isolation</span>
+          <i class="fa-solid fa-arrow-right text-[10px]"></i>
+        </div>
+      </div>
+      <!-- Card 4 -->
+      <div
+        class="capability-card cursor-pointer bg-white p-7 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors flex flex-col justify-between"
+        data-target-agent="3">
+        <div>
+          <div
+            class="w-10 h-10 rounded bg-[#f4f3f1] border border-border-hairline flex items-center justify-center text-black text-sm mb-6">
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+          </div>
+          <h3 class="text-base font-bold font-syne text-black mb-2.5">Resilient Self-Healing</h3>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            When UI markup changes, AgentSwarm synthesizes semantically durable ARIA locators and commits
+            ready-to-review GitHub pull requests.
+          </p>
+        </div>
+        <div
+          class="pt-6 mt-6 border-t border-border-hairline flex items-center justify-between text-xs font-mono text-black font-medium">
+          <span>Automated PRs</span>
+          <i class="fa-solid fa-arrow-right text-[10px]"></i>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- How It Works: 4-Stage Horizontal Workflow -->
+  <section class="py-24 px-6 max-w-[1140px] mx-auto w-full relative z-10 border-t border-border-hairline"
+    id="how-it-works">
+    <div class="max-w-2xl mb-16 text-left">
+      <span class="text-xs font-mono uppercase tracking-widest text-neutral-500">Autonomous Pipeline</span>
+      <h2 class="font-syne text-3xl sm:text-4xl font-bold text-black tracking-tight mt-3 mb-4">
+        From a single staging URL to verified quality.
+      </h2>
+      <p class="text-on-surface-variant text-sm sm:text-base leading-relaxed">
+        AgentSwarm orchestrates parallel headless processes, analyzes accessibility trees, and guarantees zero test rot
+        without manual script tuning.
+      </p>
+    </div>
+    <!-- 4 Stage Architectural Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 relative">
+      <!-- Stage 1 -->
+      <div
+        class="stage-card cursor-pointer bg-white p-6 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors text-left flex flex-col justify-between"
+        data-stage-agent="0">
+        <div>
+          <div class="flex items-center justify-between mb-6">
+            <span
+              class="text-xs font-mono font-bold text-black bg-[#f4f3f1] px-2.5 py-1 rounded border border-border-hairline whitespace-nowrap">STAGE
+              01</span>
+            <span class="text-[10px] font-mono text-neutral-400">CONNECT</span>
+          </div>
+          <h4 class="text-sm font-bold font-syne text-black mb-2">Connect Endpoint</h4>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Provide your staging URL, optional test credentials, or trigger automatically via GitHub Actions / GitLab CI
+            Webhooks.
+          </p>
+        </div>
+        <div class="mt-6 pt-4 border-t border-border-hairline text-[11px] font-mono text-neutral-500">
+          Zero SDK installation required
+        </div>
+      </div>
+      <!-- Stage 2 -->
+      <div
+        class="stage-card cursor-pointer bg-white p-6 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors text-left flex flex-col justify-between"
+        data-stage-agent="1">
+        <div>
+          <div class="flex items-center justify-between mb-6">
+            <span
+              class="text-xs font-mono font-bold text-black bg-[#f4f3f1] px-2.5 py-1 rounded border border-border-hairline whitespace-nowrap">STAGE
+              02</span>
+            <span class="text-[10px] font-mono text-neutral-400">DISPATCH</span>
+          </div>
+          <h4 class="text-sm font-bold font-syne text-black mb-2">Dispatch Swarm</h4>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            The Orchestrator distributes parallel jobs across specialized Explorer and Workflow workers across isolated
+            containers.
+          </p>
+        </div>
+        <div class="mt-6 pt-4 border-t border-border-hairline text-[11px] font-mono text-neutral-500">
+          Scales dynamically up to 100+ instances
+        </div>
+      </div>
+      <!-- Stage 3 -->
+      <div
+        class="stage-card cursor-pointer bg-white p-6 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors text-left flex flex-col justify-between"
+        data-stage-agent="2">
+        <div>
+          <div class="flex items-center justify-between mb-6">
+            <span
+              class="text-xs font-mono font-bold text-black bg-[#f4f3f1] px-2.5 py-1 rounded border border-border-hairline whitespace-nowrap">STAGE
+              03</span>
+            <span class="text-[10px] font-mono text-neutral-400">EXECUTE</span>
+          </div>
+          <h4 class="text-sm font-bold font-syne text-black mb-2">Execute &amp; Diagnose</h4>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Simulates real interactions, inspects console logs, network responses, and captures high-res video replays
+            with DevTools traces.
+          </p>
+        </div>
+        <div class="mt-6 pt-4 border-t border-border-hairline text-[11px] font-mono text-neutral-500">
+          Full DOM &amp; network observability
+        </div>
+      </div>
+      <!-- Stage 4 -->
+      <div
+        class="stage-card cursor-pointer bg-white p-6 rounded-xl border border-border-hairline shadow-subtle hover:border-black transition-colors text-left flex flex-col justify-between"
+        data-stage-agent="3">
+        <div>
+          <div class="flex items-center justify-between mb-6">
+            <span
+              class="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded border border-emerald-200 whitespace-nowrap">STAGE
+              04</span>
+            <span class="text-[10px] font-mono text-emerald-700">HEAL</span>
+          </div>
+          <h4 class="text-sm font-bold font-syne text-black mb-2">Heal &amp; Commit</h4>
+          <p class="text-xs text-on-surface-variant leading-relaxed">
+            Generates verified Playwright / Cypress locator patches and opens pull requests with automated regression
+            validation.
+          </p>
+        </div>
+        <div class="mt-6 pt-4 border-t border-border-hairline text-[11px] font-mono text-emerald-700 font-medium">
+          Ready-to-merge GitHub pull request
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- Self-Healing Code Diff Spotlight: High-Contrast Editorial Code Card -->
+  <section class="py-24 px-6 max-w-[1140px] mx-auto w-full relative z-10 border-t border-border-hairline"
+    id="self-healing">
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+      <div class="lg:col-span-5 text-left space-y-6">
+        <div
+          class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white border border-border-hairline text-neutral-800 text-xs font-mono shadow-subtle whitespace-nowrap">
+          <i class="fa-solid fa-code-compare text-emerald-600"></i>
+          <span>Resilient Locator Healing</span>
+        </div>
+        <h3 class="font-syne text-3xl sm:text-4xl font-bold text-black tracking-tight leading-tight">
+          Never manually repair brittle test selectors again.
+        </h3>
+        <p class="text-sm text-on-surface-variant leading-relaxed">
+          Frontend refactors and class name updates routinely break traditional end-to-end tests. AgentSwarm observes
+          the semantic accessibility tree and user intent to generate permanent, resilient Playwright patches.
+        </p>
+        <div class="space-y-3 pt-2 text-xs font-mono text-neutral-700">
+          <div class="flex items-center gap-3">
+            <i class="fa-solid fa-check text-black"></i>
+            <span>99.4% locator verification rate across 10,000+ suites</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <i class="fa-solid fa-check text-black"></i>
+            <span>Native support for Playwright, Cypress, and Selenium</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <i class="fa-solid fa-check text-black"></i>
+            <span>Strict zero-hallucination verification sandbox</span>
+          </div>
+        </div>
+        <div class="pt-4">
+          <a class="inline-flex items-center gap-2 text-xs font-mono font-medium text-black border-b border-black pb-1 hover:text-neutral-600 hover:border-neutral-400 transition-colors"
+            href="#self-healing" id="btn-whitepaper">
+            <span>Explore the Locator Synthesis Whitepaper</span>
+            <i class="fa-solid fa-arrow-right text-[10px]"></i>
+          </a>
+        </div>
+      </div>
+      <!-- Code Diff Inspector Box -->
+      <div
+        class="lg:col-span-7 rounded-xl bg-white border border-border-hairline shadow-card overflow-hidden text-left font-mono text-xs">
+        <div
+          class="flex items-center justify-between px-5 py-3.5 bg-[#f4f3f1] border-b border-border-hairline text-neutral-600 flex-wrap gap-2">
+          <div class="flex items-center gap-2.5">
+            <i class="fa-brands fa-git-alt text-black text-sm"></i>
+            <span class="text-black font-semibold" id="patch-filename">e2e/checkout-journey.spec.ts</span>
+            <span
+              class="px-2 py-0.5 rounded bg-white text-neutral-700 text-[10px] border border-border-hairline whitespace-nowrap"
+              id="patch-pr-badge">PR #402 Patch</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="inline-flex rounded border border-border-hairline bg-white p-0.5 text-[10px]">
+              <button class="framework-tab px-2 py-0.5 rounded bg-black text-white font-medium transition-colors"
+                data-fw="playwright" type="button">Playwright</button>
+              <button class="framework-tab px-2 py-0.5 rounded text-neutral-600 hover:text-black transition-colors"
+                data-fw="cypress" type="button">Cypress</button>
+              <button class="framework-tab px-2 py-0.5 rounded text-neutral-600 hover:text-black transition-colors"
+                data-fw="selenium" type="button">Selenium</button>
+            </div>
+            <span
+              class="text-[11px] text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-medium whitespace-nowrap">Verified
+              Sandbox Pass</span>
+          </div>
+        </div>
+        <div class="p-6 space-y-2 text-[12px] bg-white leading-relaxed overflow-x-auto">
+          <p class="text-neutral-400" id="patch-comment">// Step 3: Trigger checkout transaction</p>
+          <div class="bg-red-50/70 border-l-2 border-red-500 pl-3.5 py-2 my-2 text-red-950">
+            <span class="text-red-600 font-bold mr-2 select-none">-</span>
+            <span id="patch-old-line">const checkoutBtn = page.locator('#checkout_cta_v1');</span>
+            <span class="text-[11px] text-red-600/90 block mt-1" id="patch-error-comment">// Error: element not found
+              after timeout 5000ms</span>
+          </div>
+          <div class="bg-emerald-50/70 border-l-2 border-emerald-600 pl-3.5 py-2 my-2 text-emerald-950">
+            <span class="text-emerald-700 font-bold mr-2 select-none">+</span>
+            <span id="patch-new-line">const checkoutBtn = page.getByRole('button', { name: /proceed to review/i
+              });</span>
+            <span class="text-[11px] text-emerald-700/90 block mt-1" id="patch-healed-comment">// Healed: Semantic
+              accessible role query, resilient to DOM refactoring</span>
+          </div>
+          <p class="text-neutral-600 pl-4 mt-2" id="patch-action-line-1">await checkoutBtn.click();</p>
+          <p class="text-neutral-600 pl-4" id="patch-action-line-2">await expect(page).toHaveURL(/.*checkout\/summary/);
+          </p>
+        </div>
+        <div
+          class="px-5 py-3.5 bg-[#f4f3f1] border-t border-border-hairline flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div class="flex items-center gap-2 text-[11px] text-neutral-600">
+            <i class="fa-solid fa-circle-check text-emerald-600"></i>
+            <span id="patch-exec-note">Re-executed in isolated Chromium instance (0.42s)</span>
+          </div>
+          <button
+            class="px-3.5 py-1.5 rounded bg-black text-white hover:bg-neutral-800 font-medium text-xs flex items-center justify-center gap-2 transition-all whitespace-nowrap"
+            id="btn-create-pr" type="button">
+            <i class="fa-brands fa-github text-[11px]"></i>
+            <span id="btn-create-pr-text">Create GitHub Pull Request</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- Security & Enterprise Compliance -->
+  <section class="py-20 px-6 max-w-[1140px] mx-auto w-full relative z-10 border-t border-border-hairline text-center"
+    id="security">
+    <div class="max-w-xl mx-auto mb-12">
+      <span class="text-xs font-mono uppercase tracking-widest text-neutral-500">Enterprise Readiness</span>
+      <h3 class="font-syne text-2xl sm:text-3xl font-bold text-black tracking-tight mt-2 mb-3">
+        Built for regulated architectures.
+      </h3>
+      <p class="text-xs sm:text-sm text-on-surface-variant leading-relaxed">
+        AgentSwarm operates inside your VPC or isolated cloud tenancies with zero training on your proprietary customer
+        data.
+      </p>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto">
+      <div class="p-5 rounded-lg border border-border-hairline bg-white shadow-subtle text-left">
+        <i class="fa-solid fa-shield-halved text-black text-base mb-2"></i>
+        <h4 class="font-syne font-bold text-xs text-black">SOC 2 Type II</h4>
+        <p class="text-[11px] text-on-surface-variant font-mono mt-1">Certified controls and encrypted storage.</p>
+      </div>
+      <div class="p-5 rounded-lg border border-border-hairline bg-white shadow-subtle text-left">
+        <i class="fa-solid fa-lock text-black text-base mb-2"></i>
+        <h4 class="font-syne font-bold text-xs text-black">HIPAA &amp; GDPR</h4>
+        <p class="text-[11px] text-on-surface-variant font-mono mt-1">Automatic PII scrubbing in network traces.</p>
+      </div>
+      <div class="p-5 rounded-lg border border-border-hairline bg-white shadow-subtle text-left">
+        <i class="fa-solid fa-network-wired text-black text-base mb-2"></i>
+        <h4 class="font-syne font-bold text-xs text-black">VPC Peering</h4>
+        <p class="text-[11px] text-on-surface-variant font-mono mt-1">Deploy workers behind private corporate firewalls.
+        </p>
+      </div>
+      <div class="p-5 rounded-lg border border-border-hairline bg-white shadow-subtle text-left">
+        <i class="fa-solid fa-key text-black text-base mb-2"></i>
+        <h4 class="font-syne font-bold text-xs text-black">Zero Data Retention</h4>
+        <p class="text-[11px] text-on-surface-variant font-mono mt-1">Model calls never used for foundation training.
+        </p>
+      </div>
+    </div>
+  </section>
+  <!-- Final Call to Action Section -->
+  <section class="py-24 px-6 max-w-[1140px] mx-auto w-full relative z-10 text-center" id="cta">
+    <div class="bg-white p-10 sm:p-16 rounded-2xl border border-border-hairline shadow-card relative overflow-hidden">
+      <div class="max-w-2xl mx-auto space-y-4">
+        <span class="text-xs font-mono uppercase tracking-widest text-neutral-500">Autonomous QA In Minutes</span>
+        <h2 class="font-syne text-3xl sm:text-5xl font-bold text-black tracking-tight leading-tight">
+          Ready to deploy your first testing swarm?
+        </h2>
+        <p class="text-sm sm:text-base text-on-surface-variant leading-relaxed">
+          Point AgentSwarm at any staging environment. Let agents discover edge cases, test end-to-end flows, and keep
+          your test suite green.
+        </p>
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-3.5 pt-6">
+          <a class="w-full sm:w-auto px-8 py-3.5 rounded-lg bg-black text-white font-mono text-xs font-semibold hover:bg-neutral-800 transition-all shadow-subtle"
+            href="#orchestrator" id="btn-cta-workspace">
+            Launch Workspace Free
+          </a>
+          <a class="w-full sm:w-auto px-6 py-3.5 rounded-lg bg-surface-container-low border border-border-hairline text-black font-mono text-xs font-medium hover:bg-surface-container transition-all"
+            href="#cta" id="btn-schedule-briefing">
+            Schedule Technical Briefing
+          </a>
+        </div>
+        <p class="text-[11px] font-mono text-neutral-400 pt-4">
+          No credit card required • Connects via GitHub, GitLab, or Headless CI runner
+        </p>
+      </div>
+    </div>
+  </section>
+  <!-- Footer -->
+  <footer
+    class="mt-auto border-t border-border-hairline bg-[#faf9f7] py-14 px-6 text-xs text-on-surface-variant font-mono">
+    <div class="max-w-[1140px] mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-8">
+      <div class="space-y-2">
+        <div class="flex items-center gap-2.5">
+          <div class="w-5 h-5 bg-black rounded flex items-center justify-center text-white text-[10px]">
+            <i class="fa-solid fa-diagram-project"></i>
+          </div>
+          <span class="font-syne font-bold text-black text-sm">AgentSwarm</span>
+        </div>
+        <p class="text-neutral-500 text-[11px]">Autonomous exploratory testing &amp; resilient self-healing platform.
+        </p>
+      </div>
+      <div class="flex flex-wrap items-center gap-6 text-[11px]">
+        <a class="text-neutral-600 hover:text-black transition-colors" href="#how-it-works">Documentation</a>
+        <a class="text-neutral-600 hover:text-black transition-colors" href="#self-healing">Architecture Whitepaper</a>
+        <a class="text-neutral-600 hover:text-black transition-colors" href="#security">Security &amp; Trust Center</a>
+        <a class="text-neutral-600 hover:text-black transition-colors" href="#security">Privacy Policy</a>
+        <a class="text-neutral-600 hover:text-black transition-colors" href="#self-healing">GitHub Repository</a>
+      </div>
+      <div class="text-[11px] text-neutral-400">
+        © 2025 AgentSwarm Systems Inc. All rights reserved.
+      </div>
+    </div>
+  </footer>
+
+  <!-- =========================================================================
+       ChaosSwarm Modular JavaScript Architecture
+       Contains interactive UI drivers and clean placeholder stubs
+       ready for backend integration (Auth / Cookies / Swarm API / User Data).
+       ========================================================================= -->
+  <script>
+    /**
+     * ChaosSwarm Core Client Architecture
+     */
+    const ChaosSwarm = {
+      // -----------------------------------------------------------------------
+      // 1. User Authentication & Session (Stubs for your backend)
+      // -----------------------------------------------------------------------
+      auth: {
+        /**
+         * Handle user login
+         * @param {Object} credentials - e.g., { email, password }
+         * @returns {Promise<Object>} user session response
+         */
+        async handleUserLogin(credentials = {}) {
+          // TODO: Connect to your backend login endpoint, e.g.:
+          // const res = await fetch('/api/auth/login', {
+          //   method: 'POST',
+          //   headers: { 'Content-Type': 'application/json' },
+          //   body: JSON.stringify(credentials)
+          // });
+          // return await res.json();
+          console.log('[ChaosSwarm Auth] handleUserLogin placeholder invoked:', credentials);
+          return null;
+        },
+
+        /**
+         * Handle new user registration
+         * @param {Object} userData - e.g., { name, email, password }
+         * @returns {Promise<Object>}
+         */
+        async handleUserSignup(userData = {}) {
+          // TODO: Connect to your backend registration endpoint
+          console.log('[ChaosSwarm Auth] handleUserSignup placeholder invoked:', userData);
+          return null;
+        },
+
+        /**
+         * Terminate user session
+         */
+        async handleUserLogout() {
+          // TODO: Invalidate token / session on backend
+          console.log('[ChaosSwarm Auth] handleUserLogout placeholder invoked');
+          return true;
+        },
+
+        /**
+         * Check if current user is authenticated
+         * @returns {Promise<boolean>}
+         */
+        async checkAuthStatus() {
+          // TODO: Verify JWT or session cookie with backend
+          return false;
+        }
+      },
+
+      // -----------------------------------------------------------------------
+      // 2. Cookie Consent & Privacy Compliance (Stubs for your backend)
+      // -----------------------------------------------------------------------
+      cookies: {
+        /**
+         * Initialize cookie consent state from storage or backend
+         */
+        initCookieConsent() {
+          // TODO: Check if user has already accepted cookies (localStorage / cookie)
+          console.log('[ChaosSwarm Cookies] initCookieConsent placeholder');
+        },
+
+        /**
+         * Accept cookies with specified categories
+         * @param {Object} preferences - e.g., { essential: true, analytics: true, marketing: false }
+         */
+        acceptCookies(preferences = { essential: true, analytics: true }) {
+          // TODO: Save preferences to localStorage or sync to backend profile
+          console.log('[ChaosSwarm Cookies] acceptCookies placeholder:', preferences);
+        },
+
+        /**
+         * Decline non-essential cookies
+         */
+        declineCookies() {
+          // TODO: Store decline preference
+          console.log('[ChaosSwarm Cookies] declineCookies placeholder');
+        },
+
+        /**
+         * Retrieve current cookie consent preferences
+         * @returns {Object|null}
+         */
+        getPreferences() {
+          // TODO: Return stored preferences
+          return null;
+        }
+      },
+
+      // -----------------------------------------------------------------------
+      // 3. User Data & Profiles (Stubs for your backend)
+      // -----------------------------------------------------------------------
+      userData: {
+        /**
+         * Fetch profile data for logged-in user
+         * @param {string} userId
+         * @returns {Promise<Object|null>}
+         */
+        async loadUserProfile(userId) {
+          // TODO: Fetch user profile, staging URLs, saved tests from backend
+          console.log('[ChaosSwarm UserData] loadUserProfile placeholder for ID:', userId);
+          return null;
+        },
+
+        /**
+         * Save or update user settings / test preferences
+         * @param {Object} profileData
+         * @returns {Promise<boolean>}
+         */
+        async saveUserSettings(profileData = {}) {
+          // TODO: POST /api/user/settings
+          console.log('[ChaosSwarm UserData] saveUserSettings placeholder:', profileData);
+          return true;
+        }
+      },
+
+      // -----------------------------------------------------------------------
+      // 4. Swarm Execution & Headless Orchestrator API
+      // -----------------------------------------------------------------------
+      swarm: {
+        state: {
+          targetUrl: 'https://staging.store.nexus',
+          activeAgentIndex: 1, // Default: Workflow Agent (02)
+          framework: 'playwright',
+          isRunning: false,
+          intervalId: null
+        },
+
+        /**
+         * Deploy synthetic agent swarm to a staging URL
+         * @param {string} rawUrl - Target URL to test
+         */
+        async deploySwarm(rawUrl) {
+          let url = (rawUrl || '').trim();
+          if (!url) url = 'https://staging.store.nexus';
+          if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+          this.state.targetUrl = url;
+
+          const urlInput = document.getElementById('target-url-input');
+          if (urlInput) urlInput.value = url;
+
+          const deployBtnLabel = document.getElementById('btn-deploy-swarm-label');
+          const statusText = document.getElementById('cluster-status-text');
+
+          if (deployBtnLabel) deployBtnLabel.textContent = 'Running...';
+          if (statusText) statusText.textContent = 'SWARM ACTIVE';
+
+          // Cycle through agents to visually display the live distributed execution
+          let step = 0;
+          this.selectAgent(step);
+
+          if (this.state.intervalId) clearInterval(this.state.intervalId);
+          this.state.isRunning = true;
+
+          this.state.intervalId = setInterval(() => {
+            step++;
+            if (step < 5) {
+              ChaosSwarm.swarm.selectAgent(step);
+            } else {
+              clearInterval(ChaosSwarm.swarm.state.intervalId);
+              ChaosSwarm.swarm.state.intervalId = null;
+              ChaosSwarm.swarm.state.isRunning = false;
+              ChaosSwarm.swarm.selectAgent(1); // Return to interactive Workflow view
+
+              if (deployBtnLabel) deployBtnLabel.textContent = 'Deploy';
+              if (statusText) statusText.textContent = 'CLUSTER ONLINE';
+            }
+          }, 1100);
+
+          // TODO: Connect to backend Swarm Dispatcher endpoint:
+          // fetch('/api/swarm/deploy', {
+          //   method: 'POST',
+          //   headers: { 'Content-Type': 'application/json' },
+          //   body: JSON.stringify({ targetUrl: url })
+          // });
+        },
+
+        /**
+         * Switch active displayed agent in the live architecture inspector
+         * @param {number} index - 0 to 4
+         */
+        selectAgent(index) {
+          this.state.activeAgentIndex = index;
+          const agents = [
+            {
+              id: '01',
+              name: 'Explorer Agent',
+              badge: 'EXPLORING',
+              desc: 'Autonomous crawling of 24 unmapped routes.',
+              session: 'Playwright Headless Session #402',
+              route: this.state.targetUrl + '/catalog/discover',
+              status: '200 OK',
+              step: 'Explorer Agent: Crawling Route 18 of 24',
+              domState: 'State: Crawling DOM',
+              title: 'Dynamic Category Graph (24 Routes Mapped)',
+              meta: 'DOM Nodes: 1,420 • Interactive Elements: 86 • Shadow Roots: 3',
+              price: '24 Routes',
+              env: 'Discovered (Zero Broken Links)',
+              cta: 'Traverse Next Subtree',
+              action: 'Accessibility Tree Indexed (100%)',
+              eventLabel: 'DOM Graph Snapshot',
+              conf: 'Coverage: 98.2%',
+              failedLabel: '- Unmapped Dynamic Route',
+              failedCode: "a[href='/checkout/express-drawer']",
+              healedLabel: '+ Autonomous Route Discovery',
+              healedCode: 'await agent.explore({ depth: 4, includeShadowDom: true });',
+              retest: 'Graph built in 0.64s',
+              prStatus: '24 Specs Generated',
+              cpu: '42%'
+            },
+            {
+              id: '02',
+              name: 'Workflow Agent',
+              badge: 'DISPATCHED',
+              desc: 'Simulating multi-stage checkout & payment token.',
+              session: 'Playwright Headless Session #402',
+              route: this.state.targetUrl + '/checkout',
+              status: '200 OK',
+              step: 'Workflow Agent: Interactive Step 4 of 6',
+              domState: 'State: Interactive',
+              title: 'Enterprise Precision Laptop (M4 Pro)',
+              meta: 'SKU: PROD-9941 • Cart ID: CT-08912',
+              price: '$1,499.00',
+              env: 'USD (Staging Sandbox)',
+              cta: 'Add to Cart & Proceed',
+              action: 'Agent Synthetic Click Registered',
+              eventLabel: 'Self-Healing Event',
+              conf: 'Confidence: 99.4%',
+              failedLabel: '- Brittle Legacy Selector (Failed)',
+              failedCode: "page.locator('#checkout_btn_v1');",
+              healedLabel: '+ Resilient ARIA Healed Locator',
+              healedCode: "page.getByRole('button', { name: /proceed/i });",
+              retest: 'Re-test: Passed in 0.38s',
+              prStatus: 'PR Automated',
+              cpu: '34%'
+            },
+            {
+              id: '03',
+              name: 'Diagnosis Agent',
+              badge: 'ANALYZING',
+              desc: 'Triaging GraphQL mutations & DOM anomalies.',
+              session: 'Playwright Headless Session #402',
+              route: this.state.targetUrl + '/api/graphql',
+              status: '200 OK',
+              step: 'Diagnosis Agent: Root Cause Triage Step 2 of 2',
+              domState: 'State: Inspecting Trace',
+              title: 'DOM Refactor vs. API Regression Triage',
+              meta: 'GraphQL Mutation: createCheckoutSession • Latency: 48ms',
+              price: '0 API Errors',
+              env: 'UI Selector Drift Isolated',
+              cta: 'Re-verify Network Trace',
+              action: 'False-Positive Alert Suppressed',
+              eventLabel: 'Root Cause Classification',
+              conf: 'Confidence: 99.8%',
+              failedLabel: '- Legacy CSS Class Removed',
+              failedCode: "Error: Timeout 5000ms waiting for selector '.btn-checkout-legacy'",
+              healedLabel: '+ Diagnosis Verdict: Pure Markup Refactor',
+              healedCode: 'Backend HTTP 200 verified -> Triggering Self-Healing Agent #04',
+              retest: 'Triaged in 0.21s',
+              prStatus: 'Zero Flake Noise',
+              cpu: '51%'
+            },
+            {
+              id: '04',
+              name: 'Healing Agent',
+              badge: 'HEALED',
+              desc: 'Synthesizing ARIA-resilient locators.',
+              session: 'Playwright Headless Session #402',
+              route: this.state.targetUrl + '/checkout',
+              status: '200 OK',
+              step: 'Healing Agent: Semantic ARIA Synthesis Complete',
+              domState: 'State: Patch Synthesized',
+              title: 'Semantic Accessibility Locator Synthesis',
+              meta: 'Target Role: button • Accessible Name: "Add to Cart & Proceed"',
+              price: '99.4% Match',
+              env: 'Semantic Role Score',
+              cta: 'Test Healed Locator',
+              action: 'ARIA Locator Bound & Verified',
+              eventLabel: 'Self-Healing Event',
+              conf: 'Confidence: 99.4%',
+              failedLabel: '- Brittle Legacy Selector (Failed)',
+              failedCode: "page.locator('#checkout_btn_v1');",
+              healedLabel: '+ Resilient ARIA Healed Locator',
+              healedCode: "page.getByRole('button', { name: /proceed/i });",
+              retest: 'Synthesized in 0.19s',
+              prStatus: 'Patch Ready (#402)',
+              cpu: '39%'
+            },
+            {
+              id: '05',
+              name: 'Verification Agent',
+              badge: 'VERIFY',
+              desc: 'Regression validation in sandbox runner.',
+              session: 'Playwright Headless Session #402',
+              route: this.state.targetUrl + '/checkout/summary',
+              status: '200 OK',
+              step: 'Verification Agent: 10/10 Sandbox Runs Green',
+              domState: 'State: Verified Pass',
+              title: 'Order Summary & Payment Token Verified',
+              meta: 'Sandbox Run: 10/10 Passed • Flake Rate: 0.00%',
+              price: '100% Green',
+              env: 'Isolated Chromium Cluster',
+              cta: 'View Verification Proof',
+              action: 'Zero-Hallucination Check Passed',
+              eventLabel: 'Sandbox Regression Gate',
+              conf: '10/10 Runs Passed',
+              failedLabel: '- Before Patch: Suite Status',
+              failedCode: 'FAIL e2e/checkout-journey.spec.ts (1 failed, 5000ms timeout)',
+              healedLabel: '+ After Patch: Suite Status',
+              healedCode: 'PASS e2e/checkout-journey.spec.ts (6 assertions passed in 0.38s)',
+              retest: 'Re-test: Passed in 0.38s',
+              prStatus: 'PR #402 Ready to Merge',
+              cpu: '28%'
+            }
+          ];
+
+          const active = agents[index] || agents[1];
+
+          // Highlight selected agent card
+          const cards = document.querySelectorAll('.agent-node');
+          cards.forEach((card, idx) => {
+            const numEl = card.querySelector('.node-num');
+            const badgeEl = card.querySelector('.node-badge');
+            if (idx === index) {
+              card.className = 'agent-node bg-white p-4 rounded-lg border-2 border-black shadow-subtle transition-all';
+              if (idx === 3) {
+                numEl.className = 'node-num w-7 h-7 rounded bg-emerald-600 text-white flex items-center justify-center text-xs font-mono font-bold';
+                badgeEl.className = 'node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-600 text-white font-medium';
+              } else {
+                numEl.className = 'node-num w-7 h-7 rounded bg-black flex items-center justify-center text-white text-xs font-mono';
+                badgeEl.className = 'node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-black text-white font-medium';
+              }
+            } else {
+              card.className = 'agent-node bg-white p-4 rounded-lg border border-border-hairline shadow-subtle hover:border-black transition-all';
+              if (idx === 3) {
+                numEl.className = 'node-num w-7 h-7 rounded bg-emerald-50 text-emerald-800 flex items-center justify-center text-xs font-mono font-bold';
+                badgeEl.className = 'node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium';
+              } else {
+                numEl.className = 'node-num w-7 h-7 rounded bg-surface-container flex items-center justify-center text-black text-xs font-mono';
+                badgeEl.className = 'node-badge text-[10px] font-mono px-2 py-0.5 rounded bg-surface-container text-neutral-700';
+              }
+            }
+          });
+
+          // Update connection dots
+          document.querySelectorAll('.conn-dot').forEach((dot, idx) => {
+            if (idx === index) {
+              dot.classList.remove('bg-neutral-400');
+              dot.classList.add('bg-black', 'scale-125');
+            } else {
+              dot.classList.remove('bg-black', 'scale-125');
+              dot.classList.add('bg-neutral-400');
+            }
+          });
+
+          // Update inspector values
+          const setTxt = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+          };
+
+          setTxt('cpu-load-display', 'CPU Load: ' + active.cpu);
+          setTxt('inspector-session-title', active.session);
+          setTxt('inspector-url-display', active.route);
+          setTxt('inspector-http-status', active.status);
+          setTxt('inspector-step-label', active.step);
+          setTxt('dom-state-badge', active.domState);
+          setTxt('dom-product-title', active.title);
+          setTxt('dom-product-meta', active.meta);
+          setTxt('dom-product-price', active.price);
+          setTxt('dom-product-env', active.env);
+          setTxt('dom-cta-text', active.cta);
+          setTxt('synthetic-action-text', active.action);
+          setTxt('healing-event-label', active.eventLabel);
+          setTxt('healing-confidence-badge', active.conf);
+          setTxt('diff-failed-label', active.failedLabel);
+          setTxt('diff-failed-code', active.failedCode);
+          setTxt('diff-healed-label', active.healedLabel);
+          setTxt('diff-healed-code', active.healedCode);
+          setTxt('healing-retest-time', active.retest);
+          setTxt('healing-pr-status', active.prStatus);
+        }
+      }
+    };
+
+    // Framework code diffs (Playwright / Cypress / Selenium)
+    const frameworkPatches = {
+      playwright: {
+        filename: 'e2e/checkout-journey.spec.ts',
+        comment: '// Step 3: Trigger checkout transaction',
+        oldLine: "const checkoutBtn = page.locator('#checkout_cta_v1');",
+        errorComment: '// Error: element not found after timeout 5000ms',
+        newLine: "const checkoutBtn = page.getByRole('button', { name: /proceed to review/i });",
+        healedComment: '// Healed: Semantic accessible role query, resilient to DOM refactoring',
+        action1: 'await checkoutBtn.click();',
+        action2: 'await expect(page).toHaveURL(/.*checkout\\/summary/);',
+        execNote: 'Re-executed in isolated Chromium instance (0.42s)'
+      },
+      cypress: {
+        filename: 'cypress/e2e/checkout-journey.cy.ts',
+        comment: '// Step 3: Trigger checkout transaction',
+        oldLine: "cy.get('#checkout_cta_v1').click();",
+        errorComment: '// AssertionError: Timed out retrying after 4000ms',
+        newLine: "cy.findByRole('button', { name: /proceed to review/i }).click();",
+        healedComment: '// Healed: Testing Library ARIA role selector',
+        action1: "cy.location('pathname').should('include', '/checkout/summary');",
+        action2: "cy.contains('Order Summary').should('be.visible');",
+        execNote: 'Re-executed in isolated Cypress Electron runner (0.49s)'
+      },
+      selenium: {
+        filename: 'tests/e2e/test_checkout_journey.py',
+        comment: '# Step 3: Trigger checkout transaction',
+        oldLine: 'checkout_btn = driver.find_element(By.ID, "checkout_cta_v1")',
+        errorComment: '# NoSuchElementException: Unable to locate element: #checkout_cta_v1',
+        newLine: 'checkout_btn = driver.find_element(By.XPATH, "//button[contains(., \'proceed to review\')]")',
+        healedComment: '# Healed: Semantic accessible button matcher',
+        action1: 'checkout_btn.click()',
+        action2: 'WebDriverWait(driver, 5).until(EC.url_contains("/checkout/summary"))',
+        execNote: 'Re-executed in isolated Selenium 4 Grid node (0.54s)'
+      }
+    };
+
+    // Initialize Event Listeners
+    document.addEventListener('DOMContentLoaded', () => {
+      // 1. Target URL Form Submission
+      const targetForm = document.getElementById('swarm-target-form');
+      if (targetForm) {
+        targetForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const input = document.getElementById('target-url-input');
+          ChaosSwarm.swarm.deploySwarm(input ? input.value : '');
+        });
+      }
+
+      // 2. Agent Node Card Clicks
+      document.querySelectorAll('.agent-node').forEach((card) => {
+        card.addEventListener('click', () => {
+          const idx = parseInt(card.getAttribute('data-agent-index') || '1', 10);
+          ChaosSwarm.swarm.selectAgent(idx);
+        });
+      });
+
+      // 3. Framework Tabs (Playwright / Cypress / Selenium)
+      document.querySelectorAll('.framework-tab').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          const fw = tab.getAttribute('data-fw') || 'playwright';
+          document.querySelectorAll('.framework-tab').forEach((t) => {
+            if (t.getAttribute('data-fw') === fw) {
+              t.className = 'framework-tab px-2 py-0.5 rounded bg-black text-white font-medium transition-colors';
+            } else {
+              t.className = 'framework-tab px-2 py-0.5 rounded text-neutral-600 hover:text-black transition-colors';
+            }
+          });
+          const patch = frameworkPatches[fw];
+          if (!patch) return;
+          const setTxt = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+          };
+          setTxt('patch-filename', patch.filename);
+          setTxt('patch-comment', patch.comment);
+          setTxt('patch-old-line', patch.oldLine);
+          setTxt('patch-error-comment', patch.errorComment);
+          setTxt('patch-new-line', patch.newLine);
+          setTxt('patch-healed-comment', patch.healedComment);
+          setTxt('patch-action-line-1', patch.action1);
+          setTxt('patch-action-line-2', patch.action2);
+          setTxt('patch-exec-note', patch.execNote);
+        });
+      });
+
+      // 4. Hook for Sign In button (Ready for backend auth modal or redirect)
+      const signInBtn = document.getElementById('btn-signin');
+      if (signInBtn) {
+        signInBtn.addEventListener('click', () => {
+          // TODO: Open your auth modal or redirect to /login
+          console.log('[ChaosSwarm] Sign in clicked — ready for backend auth integration.');
+          ChaosSwarm.auth.handleUserLogin();
+        });
+      }
+
+      // Initialize cookie consent state check
+      ChaosSwarm.cookies.initCookieConsent();
+    });
+
+    // Expose global namespace for backend access
+    window.ChaosSwarm = ChaosSwarm;
+  </script>
+</body>
+
+</html>
