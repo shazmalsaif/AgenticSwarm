@@ -102,7 +102,7 @@
         <a class="hover:text-black transition-colors whitespace-nowrap" href="#security">Security</a>
       </nav>
       <!-- Right: Action buttons -->
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-3" id="auth-nav-container">
         <button
           class="hidden sm:inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-neutral-300 bg-white hover:border-black text-xs font-mono font-semibold text-black shadow-subtle hover:bg-neutral-50 transition-all whitespace-nowrap"
           id="btn-signin" type="button">
@@ -813,10 +813,79 @@
   </footer>
 
   <!-- =========================================================================
-       ChaosSwarm Modular JavaScript Architecture
+       AgentSwarm Modular JavaScript Architecture
        Contains interactive UI drivers and clean placeholder stubs
        ready for backend integration (Auth / Cookies / Swarm API / User Data).
        ========================================================================= -->
+  <!-- Authentication Modal (Sign In / Register with FastAPI & PostgreSQL) -->
+  <div id="auth-modal-backdrop" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 backdrop-blur-sm p-4" aria-hidden="true">
+    <div class="w-full max-w-md rounded-xl bg-white border border-border-hairline shadow-elevation overflow-hidden text-left font-sans">
+      <!-- Modal Header -->
+      <div class="px-5 py-3.5 bg-[#f4f3f1] border-b border-border-hairline flex items-center justify-between text-xs font-mono">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span class="font-semibold text-black uppercase tracking-wider">WORKSPACE AUTHENTICATION</span>
+        </div>
+        <button id="btn-close-auth-modal" type="button" aria-label="Close modal" class="text-neutral-500 hover:text-black transition-colors px-1.5 py-0.5 rounded">
+          <i class="fa-solid fa-xmark text-sm"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 space-y-5">
+        <!-- Auth Tabs: Sign In / Create Account -->
+        <div class="grid grid-cols-2 rounded-lg bg-[#f4f3f1] p-1 border border-border-hairline text-xs font-mono">
+          <button id="tab-login" type="button" class="py-1.5 rounded-md font-semibold bg-white text-black shadow-subtle transition-all text-center">
+            Sign In
+          </button>
+          <button id="tab-signup" type="button" class="py-1.5 rounded-md font-medium text-neutral-600 hover:text-black transition-all text-center">
+            Create Account
+          </button>
+        </div>
+
+        <!-- Notification Banner (Error / Success) -->
+        <div id="auth-alert" class="hidden rounded-lg p-3 text-xs font-mono border">
+          <span id="auth-alert-text"></span>
+        </div>
+
+        <!-- Auth Form -->
+        <form id="auth-form" class="space-y-4">
+          <!-- Full Name (Only for signup) -->
+          <div id="field-fullname-wrapper" class="space-y-1.5 hidden">
+            <label for="auth-fullname" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Full Name</label>
+            <input id="auth-fullname" type="text" placeholder="QA Engineer" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+
+          <!-- Email Input -->
+          <div class="space-y-1.5">
+            <label for="auth-email" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Work Email</label>
+            <input id="auth-email" type="email" required placeholder="engineer@nexus.io" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+
+          <!-- Password Input -->
+          <div class="space-y-1.5">
+            <label for="auth-password" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Password</label>
+            <input id="auth-password" type="password" required placeholder="••••••••••••" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+
+          <!-- Submit Button -->
+          <button id="btn-auth-submit" type="submit" class="w-full py-2.5 rounded-lg bg-black text-white hover:bg-neutral-800 text-xs font-mono font-medium transition-all flex items-center justify-center gap-2 shadow-subtle">
+            <span id="auth-submit-label">Sign In to Swarm</span>
+            <i class="fa-solid fa-arrow-right text-[10px]"></i>
+          </button>
+        </form>
+
+        <!-- Quick Demo Account Shortcut -->
+        <div class="pt-3 border-t border-border-hairline flex items-center justify-between text-[11px] font-mono text-neutral-500">
+          <span>Testing database?</span>
+          <button id="btn-use-demo-creds" type="button" class="text-black font-semibold hover:underline inline-flex items-center gap-1">
+            <i class="fa-solid fa-key text-[9px]"></i> Use Demo Credentials
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 

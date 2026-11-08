@@ -1,126 +1,361 @@
 /**
- * ChaosSwarm Core Client Architecture
+ * AgentSwarm Core Client Architecture
+ * Connects frontend user flows with FastAPI & PostgreSQL backend.
  */
-const ChaosSwarm = {
+
+// Dynamic Backend API Base URL detection
+const API_BASE_URL = (
+  window.location.origin && window.location.origin.startsWith('http') && !window.location.origin.includes(':5500')
+) ? window.location.origin : 'http://localhost:8000';
+
+/**
+ * Robust formatter for API error details, converting arrays/objects to readable strings.
+ */
+function formatErrorMessage(detail, fallback = 'Operation failed.') {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map(item => {
+      if (typeof item === 'string') return item;
+      if (typeof item === 'object' && item !== null) {
+        const loc = Array.isArray(item.loc) ? item.loc.filter(l => l !== 'body').join('.') : '';
+        const msg = item.msg || item.message || JSON.stringify(item);
+        return loc ? `${loc}: ${msg}` : msg;
+      }
+      return String(item);
+    });
+    return messages.filter(Boolean).join(' • ') || fallback;
+  }
+  if (typeof detail === 'object') {
+    return detail.msg || detail.message || detail.detail || JSON.stringify(detail);
+  }
+  return String(detail);
+}
+
+const AgentSwarm = {
   // -----------------------------------------------------------------------
-  // 1. User Authentication & Session (Stubs for your backend)
+  // 1. User Authentication & Session (Connected to FastAPI & PostgreSQL)
   // -----------------------------------------------------------------------
   auth: {
+    currentUser: null,
+    token: null,
+
     /**
-     * Handle user login
-     * @param {Object} credentials - e.g., { email, password }
-     * @returns {Promise<Object>} user session response
+     * Authenticate user against PostgreSQL via FastAPI /api/auth/login
+     * @param {Object} credentials - { email, password }
+     * @returns {Promise<Object>} { success, user, error }
      */
     async handleUserLogin(credentials = {}) {
-      // TODO: Connect to your backend login endpoint, e.g.:
-      // const res = await fetch('/api/auth/login', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify(credentials)
-      // });
-      // return await res.json();
-      console.log('[ChaosSwarm Auth] handleUserLogin placeholder invoked:', credentials);
-      return null;
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: credentials.email,
+            password: credentials.password
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          return {
+            success: false,
+            error: formatErrorMessage(data.detail, 'Login failed. Please check your credentials.')
+          };
+        }
+
+        // Store JWT token and user info
+        this.token = data.access_token;
+        this.currentUser = data.user;
+        localStorage.setItem('agentswarm_token', data.access_token);
+        localStorage.setItem('agentswarm_user', JSON.stringify(data.user));
+
+        this.updateAuthUI();
+        return { success: true, user: data.user };
+      } catch (err) {
+        console.error('[AgentSwarm Auth Error]', err);
+        return {
+          success: false,
+          error: 'Unable to connect to backend server. Ensure FastAPI is running at ' + API_BASE_URL
+        };
+      }
     },
 
     /**
-     * Handle new user registration
-     * @param {Object} userData - e.g., { name, email, password }
-     * @returns {Promise<Object>}
+     * Register new user account in PostgreSQL via FastAPI /api/auth/signup
+     * @param {Object} userData - { email, password, full_name }
+     * @returns {Promise<Object>} { success, user, error }
      */
     async handleUserSignup(userData = {}) {
-      // TODO: Connect to your backend registration endpoint
-      console.log('[ChaosSwarm Auth] handleUserSignup placeholder invoked:', userData);
-      return null;
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: userData.email,
+            password: userData.password,
+            full_name: userData.full_name || null
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          return {
+            success: false,
+            error: formatErrorMessage(data.detail, 'Registration failed. Please check your details.')
+          };
+        }
+
+        // Auto login on successful registration
+        this.token = data.access_token;
+        this.currentUser = data.user;
+        localStorage.setItem('agentswarm_token', data.access_token);
+        localStorage.setItem('agentswarm_user', JSON.stringify(data.user));
+
+        this.updateAuthUI();
+        return { success: true, user: data.user };
+      } catch (err) {
+        console.error('[AgentSwarm Signup Error]', err);
+        return {
+          success: false,
+          error: 'Unable to connect to backend server. Ensure FastAPI is running at ' + API_BASE_URL
+        };
+      }
     },
 
     /**
-     * Terminate user session
+     * Log out current user and clear stored tokens
      */
-    async handleUserLogout() {
-      // TODO: Invalidate token / session on backend
-      console.log('[ChaosSwarm Auth] handleUserLogout placeholder invoked');
-      return true;
+    handleUserLogout() {
+      this.token = null;
+      this.currentUser = null;
+      localStorage.removeItem('agentswarm_token');
+      localStorage.removeItem('agentswarm_user');
+      this.updateAuthUI();
     },
 
     /**
-     * Check if current user is authenticated
-     * @returns {Promise<boolean>}
+     * Check if user is authenticated from storage and verify with backend
      */
     async checkAuthStatus() {
-      // TODO: Verify JWT or session cookie with backend
-      return false;
+      const storedToken = localStorage.getItem('agentswarm_token');
+      const storedUser = localStorage.getItem('agentswarm_user');
+
+      if (!storedToken) {
+        this.updateAuthUI();
+        return false;
+      }
+
+      this.token = storedToken;
+      try {
+        this.currentUser = storedUser ? JSON.parse(storedUser) : null;
+      } catch (_) {
+        this.currentUser = null;
+      }
+      this.updateAuthUI();
+
+      // Verify token with backend
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
+          headers: { 'Authorization': `Bearer ${storedToken}` }
+        });
+        if (res.ok) {
+          const freshUser = await res.json();
+          this.currentUser = freshUser;
+          localStorage.setItem('agentswarm_user', JSON.stringify(freshUser));
+          this.updateAuthUI();
+          return true;
+        } else {
+          // Token expired or invalid
+          this.handleUserLogout();
+          return false;
+        }
+      } catch (err) {
+        // Network unavailable, retain local session if present
+        return !!this.currentUser;
+      }
+    },
+
+    /**
+     * Update navigation header to reflect login state
+     */
+    updateAuthUI() {
+      const container = document.getElementById('auth-nav-container');
+      if (!container) return;
+
+      if (this.currentUser) {
+        const displayName = this.currentUser.full_name || this.currentUser.email;
+        container.innerHTML = `
+          <div class="flex items-center gap-2.5">
+            <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white border border-border-hairline shadow-subtle text-xs font-mono">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span class="font-medium text-black truncate max-w-[130px] sm:max-w-[180px]" title="${this.currentUser.email}">
+                ${displayName}
+              </span>
+            </div>
+            <button id="btn-signout" type="button" class="text-xs font-mono text-neutral-500 hover:text-black transition-colors px-2 py-1">
+              Sign Out
+            </button>
+            <a class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-black text-white text-xs font-mono font-medium hover:bg-neutral-800 transition-all whitespace-nowrap shadow-subtle"
+              href="#orchestrator" id="btn-header-workspace">
+              <span>Workspace</span>
+              <i class="fa-solid fa-arrow-right text-[9px]"></i>
+            </a>
+          </div>
+        `;
+        const signoutBtn = document.getElementById('btn-signout');
+        if (signoutBtn) {
+          signoutBtn.addEventListener('click', () => this.handleUserLogout());
+        }
+      } else {
+        container.innerHTML = `
+          <button
+            class="hidden sm:inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-neutral-300 bg-white hover:border-black text-xs font-mono font-semibold text-black shadow-subtle hover:bg-neutral-50 transition-all whitespace-nowrap"
+            id="btn-signin" type="button">
+            <i class="fa-regular fa-user text-[11px] text-neutral-600"></i>
+            <span>Sign In</span>
+          </button>
+          <a class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-black text-white text-xs font-mono font-medium hover:bg-neutral-800 transition-all whitespace-nowrap shadow-subtle"
+            href="#cta" id="btn-header-workspace">
+            <span>Launch Workspace</span>
+            <i class="fa-solid fa-arrow-right text-[9px]"></i>
+          </a>
+        `;
+        const signInBtn = document.getElementById('btn-signin');
+        if (signInBtn) {
+          signInBtn.addEventListener('click', () => AgentSwarm.authModal.open('login'));
+        }
+      }
     }
   },
 
   // -----------------------------------------------------------------------
-  // 2. Cookie Consent & Privacy Compliance (Stubs for your backend)
+  // 2. Auth Modal Controller (Sign In & Sign Up UI)
+  // -----------------------------------------------------------------------
+  authModal: {
+    mode: 'login', // 'login' or 'signup'
+
+    open(mode = 'login') {
+      this.mode = mode;
+      const modal = document.getElementById('auth-modal-backdrop');
+      if (!modal) return;
+
+      this.switchTab(mode);
+      this.clearAlert();
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      setTimeout(() => document.getElementById('auth-email')?.focus(), 100);
+    },
+
+    close() {
+      const modal = document.getElementById('auth-modal-backdrop');
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      this.clearAlert();
+    },
+
+    switchTab(mode) {
+      this.mode = mode;
+      const tabLogin = document.getElementById('tab-login');
+      const tabSignup = document.getElementById('tab-signup');
+      const nameWrapper = document.getElementById('field-fullname-wrapper');
+      const submitLabel = document.getElementById('auth-submit-label');
+
+      this.clearAlert();
+
+      if (mode === 'login') {
+        tabLogin.className = 'py-1.5 rounded-md font-semibold bg-white text-black shadow-subtle transition-all text-center';
+        tabSignup.className = 'py-1.5 rounded-md font-medium text-neutral-600 hover:text-black transition-all text-center';
+        nameWrapper?.classList.add('hidden');
+        if (submitLabel) submitLabel.textContent = 'Sign In to Swarm';
+      } else {
+        tabSignup.className = 'py-1.5 rounded-md font-semibold bg-white text-black shadow-subtle transition-all text-center';
+        tabLogin.className = 'py-1.5 rounded-md font-medium text-neutral-600 hover:text-black transition-all text-center';
+        nameWrapper?.classList.remove('hidden');
+        if (submitLabel) submitLabel.textContent = 'Create Swarm Account';
+      }
+    },
+
+    showAlert(message, type = 'error') {
+      const alertBox = document.getElementById('auth-alert');
+      const alertText = document.getElementById('auth-alert-text');
+      if (!alertBox || !alertText) return;
+
+      alertText.textContent = typeof message === 'string' ? message : formatErrorMessage(message);
+      alertBox.className = type === 'error'
+        ? 'rounded-lg p-3 text-xs font-mono border bg-red-50 text-red-900 border-red-200'
+        : 'rounded-lg p-3 text-xs font-mono border bg-emerald-50 text-emerald-900 border-emerald-200';
+      alertBox.classList.remove('hidden');
+    },
+
+    clearAlert() {
+      const alertBox = document.getElementById('auth-alert');
+      if (alertBox) alertBox.classList.add('hidden');
+    },
+
+    async handleSubmit(event) {
+      event.preventDefault();
+      const email = document.getElementById('auth-email')?.value.trim();
+      const password = document.getElementById('auth-password')?.value;
+      const fullName = document.getElementById('auth-fullname')?.value.trim();
+      const submitBtn = document.getElementById('btn-auth-submit');
+      const submitLabel = document.getElementById('auth-submit-label');
+
+      if (!email || !password) {
+        this.showAlert('Please fill in both email and password.');
+        return;
+      }
+
+      // UI loading state
+      if (submitBtn) submitBtn.disabled = true;
+      const originalLabel = submitLabel ? submitLabel.textContent : '';
+      if (submitLabel) submitLabel.textContent = 'Connecting...';
+
+      let result;
+      if (this.mode === 'login') {
+        result = await AgentSwarm.auth.handleUserLogin({ email, password });
+      } else {
+        result = await AgentSwarm.auth.handleUserSignup({ email, password, full_name: fullName });
+      }
+
+      if (submitBtn) submitBtn.disabled = false;
+      if (submitLabel) submitLabel.textContent = originalLabel;
+
+      if (result.success) {
+        this.showAlert(`Welcome ${result.user.email}! Authentication verified.`, 'success');
+        setTimeout(() => this.close(), 600);
+      } else {
+        this.showAlert(result.error || 'Authentication error.');
+      }
+    }
+  },
+
+  // -----------------------------------------------------------------------
+  // 3. Cookie Consent & Privacy Compliance (Stubs for future expansion)
   // -----------------------------------------------------------------------
   cookies: {
-    /**
-     * Initialize cookie consent state from storage or backend
-     */
     initCookieConsent() {
-      // TODO: Check if user has already accepted cookies (localStorage / cookie)
-      console.log('[ChaosSwarm Cookies] initCookieConsent placeholder');
+      // Future cookie banner integration
     },
-
-    /**
-     * Accept cookies with specified categories
-     * @param {Object} preferences - e.g., { essential: true, analytics: true, marketing: false }
-     */
-    acceptCookies(preferences = { essential: true, analytics: true }) {
-      // TODO: Save preferences to localStorage or sync to backend profile
-      console.log('[ChaosSwarm Cookies] acceptCookies placeholder:', preferences);
-    },
-
-    /**
-     * Decline non-essential cookies
-     */
-    declineCookies() {
-      // TODO: Store decline preference
-      console.log('[ChaosSwarm Cookies] declineCookies placeholder');
-    },
-
-    /**
-     * Retrieve current cookie consent preferences
-     * @returns {Object|null}
-     */
-    getPreferences() {
-      // TODO: Return stored preferences
-      return null;
-    }
+    acceptCookies(preferences = { essential: true, analytics: true }) {},
+    declineCookies() {},
+    getPreferences() { return null; }
   },
 
   // -----------------------------------------------------------------------
-  // 3. User Data & Profiles (Stubs for your backend)
+  // 4. User Data & Profiles
   // -----------------------------------------------------------------------
   userData: {
-    /**
-     * Fetch profile data for logged-in user
-     * @param {string} userId
-     * @returns {Promise<Object|null>}
-     */
-    async loadUserProfile(userId) {
-      // TODO: Fetch user profile, staging URLs, saved tests from backend
-      console.log('[ChaosSwarm UserData] loadUserProfile placeholder for ID:', userId);
-      return null;
-    },
-
-    /**
-     * Save or update user settings / test preferences
-     * @param {Object} profileData
-     * @returns {Promise<boolean>}
-     */
-    async saveUserSettings(profileData = {}) {
-      // TODO: POST /api/user/settings
-      console.log('[ChaosSwarm UserData] saveUserSettings placeholder:', profileData);
-      return true;
-    }
+    async loadUserProfile(userId) { return null; },
+    async saveUserSettings(profileData = {}) { return true; }
   },
 
   // -----------------------------------------------------------------------
-  // 4. Swarm Execution & Headless Orchestrator API
+  // 5. Swarm Execution & Headless Orchestrator API
   // -----------------------------------------------------------------------
   swarm: {
     state: {
@@ -131,10 +366,6 @@ const ChaosSwarm = {
       intervalId: null
     },
 
-    /**
-     * Deploy synthetic agent swarm to a staging URL
-     * @param {string} rawUrl - Target URL to test
-     */
     async deploySwarm(rawUrl) {
       let url = (rawUrl || '').trim();
       if (!url) url = 'https://staging.store.nexus';
@@ -150,7 +381,6 @@ const ChaosSwarm = {
       if (deployBtnLabel) deployBtnLabel.textContent = 'Running...';
       if (statusText) statusText.textContent = 'SWARM ACTIVE';
 
-      // Cycle through agents to visually display the live distributed execution
       let step = 0;
       this.selectAgent(step);
 
@@ -160,30 +390,19 @@ const ChaosSwarm = {
       this.state.intervalId = setInterval(() => {
         step++;
         if (step < 5) {
-          ChaosSwarm.swarm.selectAgent(step);
+          AgentSwarm.swarm.selectAgent(step);
         } else {
-          clearInterval(ChaosSwarm.swarm.state.intervalId);
-          ChaosSwarm.swarm.state.intervalId = null;
-          ChaosSwarm.swarm.state.isRunning = false;
-          ChaosSwarm.swarm.selectAgent(1); // Return to interactive Workflow view
+          clearInterval(AgentSwarm.swarm.state.intervalId);
+          AgentSwarm.swarm.state.intervalId = null;
+          AgentSwarm.swarm.state.isRunning = false;
+          AgentSwarm.swarm.selectAgent(1);
 
           if (deployBtnLabel) deployBtnLabel.textContent = 'Deploy';
           if (statusText) statusText.textContent = 'CLUSTER ONLINE';
         }
       }, 1100);
-
-      // TODO: Connect to backend Swarm Dispatcher endpoint:
-      // fetch('/api/swarm/deploy', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify({ targetUrl: url })
-      // });
     },
 
-    /**
-     * Switch active displayed agent in the live architecture inspector
-     * @param {number} index - 0 to 4
-     */
     selectAgent(index) {
       this.state.activeAgentIndex = index;
       const agents = [
@@ -433,7 +652,7 @@ document.addEventListener('DOMContentLoaded', () => {
     targetForm.addEventListener('submit', (e) => {
       e.preventDefault();
       const input = document.getElementById('target-url-input');
-      ChaosSwarm.swarm.deploySwarm(input ? input.value : '');
+      AgentSwarm.swarm.deploySwarm(input ? input.value : '');
     });
   }
 
@@ -441,7 +660,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.agent-node').forEach((card) => {
     card.addEventListener('click', () => {
       const idx = parseInt(card.getAttribute('data-agent-index') || '1', 10);
-      ChaosSwarm.swarm.selectAgent(idx);
+      AgentSwarm.swarm.selectAgent(idx);
     });
   });
 
@@ -474,20 +693,58 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // 4. Hook for Sign In button (Ready for backend auth modal or redirect)
+  // 4. Modal Event Listeners
   const signInBtn = document.getElementById('btn-signin');
   if (signInBtn) {
-    signInBtn.addEventListener('click', () => {
-      // TODO: Open your auth modal or redirect to /login
-      console.log('[ChaosSwarm] Sign in clicked — ready for backend auth integration.');
-      ChaosSwarm.auth.handleUserLogin();
+    signInBtn.addEventListener('click', () => AgentSwarm.authModal.open('login'));
+  }
+
+  const closeAuthBtn = document.getElementById('btn-close-auth-modal');
+  if (closeAuthBtn) {
+    closeAuthBtn.addEventListener('click', () => AgentSwarm.authModal.close());
+  }
+
+  const authBackdrop = document.getElementById('auth-modal-backdrop');
+  if (authBackdrop) {
+    authBackdrop.addEventListener('click', (e) => {
+      if (e.target === authBackdrop) AgentSwarm.authModal.close();
     });
   }
 
-  // Initialize cookie consent state check
-  ChaosSwarm.cookies.initCookieConsent();
+  const tabLogin = document.getElementById('tab-login');
+  if (tabLogin) {
+    tabLogin.addEventListener('click', () => AgentSwarm.authModal.switchTab('login'));
+  }
+
+  const tabSignup = document.getElementById('tab-signup');
+  if (tabSignup) {
+    tabSignup.addEventListener('click', () => AgentSwarm.authModal.switchTab('signup'));
+  }
+
+  const authForm = document.getElementById('auth-form');
+  if (authForm) {
+    authForm.addEventListener('submit', (e) => AgentSwarm.authModal.handleSubmit(e));
+  }
+
+  const demoCredsBtn = document.getElementById('btn-use-demo-creds');
+  if (demoCredsBtn) {
+    demoCredsBtn.addEventListener('click', () => {
+      AgentSwarm.authModal.switchTab('login');
+      const emailInput = document.getElementById('auth-email');
+      const passInput = document.getElementById('auth-password');
+      if (emailInput) emailInput.value = 'demo@agentswarm.dev';
+      if (passInput) passInput.value = 'password123';
+      AgentSwarm.authModal.showAlert('Demo credentials filled: click "Sign In to Swarm" to test.', 'success');
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') AgentSwarm.authModal.close();
+  });
+
+  // Check existing session status on page load
+  AgentSwarm.auth.checkAuthStatus();
 });
 
-// Expose global namespace for backend access
-window.ChaosSwarm = ChaosSwarm;
-
+// Expose global namespace for backend and client access
+window.AgentSwarm = AgentSwarm;

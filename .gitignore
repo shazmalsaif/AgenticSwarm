@@ -1,1 +1,71 @@
-code.html
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+
+# Environment Variables (IMPORTANT)
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test
+*.env
+
+# Build Files
+dist/
+build/
+.next/
+out/
+
+# Python
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+
+# Operating System
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Testing
+coverage/
+
+# Temporary Files
+tmp/
+temp/
+
+# Database
+*.sqlite3
+*.db
+
+# Secrets and Credentials
+credentials.json
+service-account.json
+secrets/
+*.pem
+*.key
+
+# Playwright
+playwright-report/
+test-results/
+
+# Miscellaneous
+.cache/
+.turbo/
+.vercel/
+EOF
