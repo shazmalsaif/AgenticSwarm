@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
-from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-logger = logging.getLogger(__name__)
+from .planner_agent import resolve_chat_model
 
-# Load environment variables from backend/.env if present
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH)
+logger = logging.getLogger(__name__)
 
 
 class BrowserAction(BaseModel):
@@ -64,42 +59,69 @@ class NavigationRunResult(BaseModel):
     execution_mode: Literal["playwright", "simulated"] = "simulated"
 
 
+class NavigatorGraphState(TypedDict, total=False):
+    """LangGraph state contract for NavigatorAgent scenario execution."""
+
+    target_url: str
+    scenario: dict[str, Any]
+    dom_snapshot: Optional[str]
+    page: Optional[Any]
+    planned_actions: list[BrowserAction]
+    run_result: NavigationRunResult
+
+
 class NavigatorAgent:
     """
-    Browser navigation & step execution agent.
+    Model-agnostic browser navigation & execution agent powered by LangChain & LangGraph.
 
-    Translates scenario steps into structured Playwright actions and executes them
-    either against a live Playwright Page object or an intelligent DOM-aware simulator.
+    Uses `ChatPromptTemplate | llm.with_structured_output(_BrowserActionPlan)` to plan
+    Playwright actions and executes them inside a compiled LangGraph `StateGraph`
+    (`plan_actions_node -> execute_actions_node`).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None) -> None:
-        self.api_key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-        self.model_name = (model_name or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-        self._client: Optional[genai.Client] = genai.Client(api_key=self.api_key) if self.api_key else None
+    SYSTEM_PROMPT = (
+        "You are the Browser Navigator Agent for AgentSwarm. Convert test scenario steps "
+        "into precise, ordered Playwright BrowserAction items using the provided DOM snapshot "
+        "when available. Prefer resilient accessible selectors when present."
+    )
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        llm: Optional[BaseChatModel] = None,
+    ) -> None:
+        self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
+            model_name=model_name,
+            provider=provider,
+            api_key=api_key,
+            temperature=0.1,
+        )
+        self._prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.SYSTEM_PROMPT),
+                (
+                    "human",
+                    "Target URL: {target_url}\n"
+                    "Scenario ID: {scenario_id}\n"
+                    "Scenario Title: {scenario_title}\n"
+                    "Steps: {steps_repr}\n"
+                    "DOM Snapshot:\n{dom_snapshot}\n",
+                ),
+            ]
+        )
+        self._chain = (self._prompt | self._llm.with_structured_output(_BrowserActionPlan)) if self._llm else None
+        self._graph = self.build_navigator_graph()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
-    def _invoke_gemini_actions(self, prompt: str) -> list[BrowserAction]:
-        if not self._client:
-            raise RuntimeError("Gemini client is not configured.")
-
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are the Browser Navigator Agent for AgentSwarm. Convert test scenario steps "
-                    "into precise, ordered Playwright BrowserAction items using the provided DOM snapshot "
-                    "when available. Prefer resilient accessible selectors when present."
-                ),
-                response_mime_type="application/json",
-                response_schema=_BrowserActionPlan,
-                temperature=0.1,
-            ),
-        )
-        if response.parsed is not None and isinstance(response.parsed, _BrowserActionPlan):
-            return response.parsed.actions
-        parsed = _BrowserActionPlan.model_validate_json(response.text)
-        return parsed.actions
+    def _invoke_chain(self, prompt_input: dict[str, Any]) -> list[BrowserAction]:
+        if not self._chain:
+            raise RuntimeError("LangChain structured output chain is not configured.")
+        result = self._chain.invoke(prompt_input)
+        if not isinstance(result, _BrowserActionPlan):
+            result = _BrowserActionPlan.model_validate(result)
+        return result.actions
 
     def plan_actions(
         self,
@@ -107,21 +129,21 @@ class NavigatorAgent:
         scenario: dict[str, Any],
         dom_snapshot: Optional[str] = None,
     ) -> list[BrowserAction]:
-        """Convert a scenario dict into executable BrowserAction items."""
-        if self._client and scenario.get("use_llm", True):
-            prompt = (
-                f"Target URL: {target_url}\n"
-                f"Scenario ID: {scenario.get('scenario_id', 'SCN-001')}\n"
-                f"Scenario Title: {scenario.get('title', 'Test Scenario')}\n"
-                f"Steps: {scenario.get('steps', [])}\n"
-                f"DOM Snapshot:\n{(dom_snapshot or 'Not captured yet')[:3500]}\n"
-            )
+        """Convert a scenario dict into executable BrowserAction items via LangChain or deterministic mapping."""
+        if self._chain and scenario.get("use_llm", True):
+            prompt_input = {
+                "target_url": target_url,
+                "scenario_id": scenario.get("scenario_id", "SCN-001"),
+                "scenario_title": scenario.get("title", "Test Scenario"),
+                "steps_repr": str(scenario.get("steps", [])),
+                "dom_snapshot": (dom_snapshot or "Not captured yet")[:3500],
+            }
             try:
-                actions = self._invoke_gemini_actions(prompt)
+                actions = self._invoke_chain(prompt_input)
                 if actions:
                     return actions
             except Exception as exc:
-                logger.warning("[NavigatorAgent] Gemini action planning failed, using deterministic mapper: %s", exc)
+                logger.warning("[NavigatorAgent] LangChain action planning failed, using deterministic mapper: %s", exc)
 
         return self._map_steps_deterministically(target_url, scenario)
 
@@ -190,6 +212,51 @@ class NavigatorAgent:
             )
         return actions
 
+    def _node_plan_actions(self, state: NavigatorGraphState) -> dict[str, Any]:
+        actions = self.plan_actions(
+            target_url=state["target_url"],
+            scenario=state["scenario"],
+            dom_snapshot=state.get("dom_snapshot"),
+        )
+        return {"planned_actions": actions}
+
+    def _node_execute_actions(self, state: NavigatorGraphState) -> dict[str, Any]:
+        scenario = state["scenario"]
+        scenario_id = str(scenario.get("scenario_id") or "SCN-001")
+        scenario_title = str(scenario.get("title") or "Untitled Scenario")
+        target_url = state["target_url"]
+        actions = state["planned_actions"]
+        page = state.get("page")
+
+        if page is not None:
+            run_result = self._execute_with_playwright(
+                scenario_id=scenario_id,
+                scenario_title=scenario_title,
+                target_url=target_url,
+                actions=actions,
+                page=page,
+            )
+        else:
+            run_result = self._execute_simulated(
+                scenario_id=scenario_id,
+                scenario_title=scenario_title,
+                target_url=target_url,
+                actions=actions,
+                dom_snapshot=state.get("dom_snapshot"),
+            )
+        return {"run_result": run_result}
+
+    def build_navigator_graph(self):
+        """Build and compile the internal LangGraph workflow for scenario execution."""
+        builder = StateGraph(NavigatorGraphState)
+        builder.add_node("plan_actions_node", self._node_plan_actions)
+        builder.add_node("execute_actions_node", self._node_execute_actions)
+
+        builder.add_edge(START, "plan_actions_node")
+        builder.add_edge("plan_actions_node", "execute_actions_node")
+        builder.add_edge("execute_actions_node", END)
+        return builder.compile()
+
     def execute_scenario(
         self,
         target_url: str,
@@ -197,27 +264,16 @@ class NavigatorAgent:
         dom_snapshot: Optional[str] = None,
         page: Optional[Any] = None,
     ) -> NavigationRunResult:
-        """Execute a single scenario via live Playwright Page or simulated DOM evaluation."""
-        scenario_id = str(scenario.get("scenario_id") or "SCN-001")
-        scenario_title = str(scenario.get("title") or "Untitled Scenario")
-        actions = self.plan_actions(target_url=target_url, scenario=scenario, dom_snapshot=dom_snapshot)
-
-        if page is not None:
-            return self._execute_with_playwright(
-                scenario_id=scenario_id,
-                scenario_title=scenario_title,
-                target_url=target_url,
-                actions=actions,
-                page=page,
-            )
-
-        return self._execute_simulated(
-            scenario_id=scenario_id,
-            scenario_title=scenario_title,
-            target_url=target_url,
-            actions=actions,
-            dom_snapshot=dom_snapshot,
+        """Execute the compiled LangGraph navigator workflow for one scenario."""
+        result_state = self._graph.invoke(
+            {
+                "target_url": target_url,
+                "scenario": scenario,
+                "dom_snapshot": dom_snapshot,
+                "page": page,
+            }
         )
+        return result_state["run_result"]
 
     def _execute_with_playwright(
         self,
@@ -328,13 +384,12 @@ class NavigatorAgent:
         """Detect obvious CSS #id or .class drift when an HTML DOM snapshot is supplied."""
         if not selector or not dom_snapshot or "<" not in dom_snapshot:
             return False
-        # Skip multi-candidate fallback strings unless none match
         candidates = [part.strip() for part in selector.split(",") if part.strip()]
         if not candidates:
             return False
 
         for candidate in candidates:
-            if candidate.startswith("getBy") or " " not in candidate and candidate in ("main", "body", "nav", "button", "input"):
+            if candidate.startswith("getBy") or (" " not in candidate and candidate in ("main", "body", "nav", "button", "input")):
                 tag_name = candidate.split("[")[0]
                 if f"<{tag_name}" in dom_snapshot.lower():
                     return False
@@ -440,7 +495,7 @@ class NavigatorAgent:
         )
 
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph-compatible node entrypoint for executing planned scenarios."""
+        """LangGraph parent-graph node entrypoint for executing planned scenarios."""
         target_url = state.get("target_url", "https://example.com")
         dom_snapshot = state.get("dom_snapshot") or state.get("dom_summary")
         page = state.get("page")
