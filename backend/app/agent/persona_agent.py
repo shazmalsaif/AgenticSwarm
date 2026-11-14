@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-logger = logging.getLogger(__name__)
+from .planner_agent import resolve_chat_model
 
-# Load environment variables from backend/.env if present
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH)
+logger = logging.getLogger(__name__)
 
 
 class UserPersona(BaseModel):
@@ -40,21 +35,64 @@ class PersonaSuiteResult(BaseModel):
 
     target_url: str = Field(..., description="Target application URL")
     personas: list[UserPersona] = Field(default_factory=list, description="Generated synthetic QA personas")
-    generated_by: str = Field("gemini", description="Origin engine ('gemini' or 'deterministic_fallback')")
+    generated_by: str = Field("langchain", description="Origin engine identifier")
+
+
+class PersonaGraphState(TypedDict, total=False):
+    """LangGraph state contract for PersonaAgent workflow."""
+
+    target_url: str
+    app_context: Optional[str]
+    test_plan: Optional[Any]
+    count: int
+    bounded_count: int
+    scenario_ids: list[str]
+    persona_suite: PersonaSuiteResult
 
 
 class PersonaAgent:
     """
-    Synthetic QA persona generator agent.
+    Model-agnostic synthetic QA persona architect powered by LangChain & LangGraph.
 
-    Produces diverse user archetypes (happy-path shoppers, chaotic boundary testers,
-    keyboard/accessibility navigators) tailored to the application and test plan.
+    Uses `ChatPromptTemplate | llm.with_structured_output(PersonaSuiteResult)` inside
+    a compiled LangGraph `StateGraph` (`extract_scenarios -> synthesize_personas`).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None) -> None:
-        self.api_key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-        self.model_name = (model_name or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-        self._client: Optional[genai.Client] = genai.Client(api_key=self.api_key) if self.api_key else None
+    SYSTEM_PROMPT = (
+        "You are the Persona Architect Agent for AgentSwarm. Generate synthetic, "
+        "non-real QA testing personas with safe synthetic test inputs and distinct behavioral "
+        "patterns to uncover regressions, broken selectors, and validation bugs."
+    )
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        llm: Optional[BaseChatModel] = None,
+    ) -> None:
+        self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
+            model_name=model_name,
+            provider=provider,
+            api_key=api_key,
+            temperature=0.3,
+        )
+        self._prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.SYSTEM_PROMPT),
+                (
+                    "human",
+                    "Target URL: {target_url}\n"
+                    "Requested Persona Count: {bounded_count}\n"
+                    "Available Scenario IDs: {scenario_ids_text}\n"
+                    "Application Context: {app_context}\n\n"
+                    "Generate diverse QA personas including a happy-path user, an edge-case/chaos explorer, "
+                    "and an accessibility/keyboard navigator. Ensure all credentials in synthetic_data are clearly synthetic.",
+                ),
+            ]
+        )
+        self._chain = (self._prompt | self._llm.with_structured_output(PersonaSuiteResult)) if self._llm else None
+        self._graph = self.build_persona_graph()
 
     @staticmethod
     def _extract_scenario_ids(test_plan: Optional[Any]) -> list[str]:
@@ -69,31 +107,57 @@ class PersonaAgent:
         return ids or ["SCN-001"]
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
-    def _invoke_gemini(self, prompt: str) -> PersonaSuiteResult:
-        if not self._client:
-            raise RuntimeError("Gemini client is not configured.")
-
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are the Persona Architect Agent for AgentSwarm. Generate synthetic, "
-                    "non-real QA testing personas with safe synthetic test inputs and distinct behavioral "
-                    "patterns to uncover regressions, broken selectors, and validation bugs."
-                ),
-                response_mime_type="application/json",
-                response_schema=PersonaSuiteResult,
-                temperature=0.3,
-            ),
-        )
-        if response.parsed is not None and isinstance(response.parsed, PersonaSuiteResult):
-            result = response.parsed
-            result.generated_by = "gemini"
-            return result
-        result = PersonaSuiteResult.model_validate_json(response.text)
-        result.generated_by = "gemini"
+    def _invoke_chain(self, prompt_input: dict[str, Any]) -> PersonaSuiteResult:
+        if not self._chain:
+            raise RuntimeError("LangChain structured output chain is not configured.")
+        result = self._chain.invoke(prompt_input)
+        if not isinstance(result, PersonaSuiteResult):
+            result = PersonaSuiteResult.model_validate(result)
+        result.generated_by = "langchain"
         return result
+
+    def _node_extract_scenarios(self, state: PersonaGraphState) -> dict[str, Any]:
+        bounded_count = max(1, min(int(state.get("count", 3)), 8))
+        scenario_ids = self._extract_scenario_ids(state.get("test_plan"))
+        return {
+            "bounded_count": bounded_count,
+            "scenario_ids": scenario_ids,
+        }
+
+    def _node_synthesize_personas(self, state: PersonaGraphState) -> dict[str, Any]:
+        target_url = state.get("target_url", "https://example.com")
+        bounded_count = state["bounded_count"]
+        scenario_ids = state["scenario_ids"]
+        app_context = (state.get("app_context") or "Standard web application")[:3000]
+
+        if self._chain:
+            try:
+                suite = self._invoke_chain(
+                    {
+                        "target_url": target_url,
+                        "bounded_count": bounded_count,
+                        "scenario_ids_text": ", ".join(scenario_ids),
+                        "app_context": app_context,
+                    }
+                )
+                suite.target_url = target_url
+                return {"persona_suite": suite}
+            except Exception as exc:
+                logger.warning("[PersonaAgent] LangChain generation failed, using deterministic fallback: %s", exc)
+
+        suite = self._build_fallback_personas(target_url, scenario_ids, bounded_count)
+        return {"persona_suite": suite}
+
+    def build_persona_graph(self):
+        """Build and compile the internal LangGraph workflow for persona synthesis."""
+        builder = StateGraph(PersonaGraphState)
+        builder.add_node("extract_scenarios", self._node_extract_scenarios)
+        builder.add_node("synthesize_personas", self._node_synthesize_personas)
+
+        builder.add_edge(START, "extract_scenarios")
+        builder.add_edge("extract_scenarios", "synthesize_personas")
+        builder.add_edge("synthesize_personas", END)
+        return builder.compile()
 
     def generate_personas(
         self,
@@ -102,27 +166,16 @@ class PersonaAgent:
         test_plan: Optional[Any] = None,
         count: int = 3,
     ) -> PersonaSuiteResult:
-        """Generate a calibrated suite of synthetic QA personas for the target application."""
-        bounded_count = max(1, min(count, 8))
-        scenario_ids = self._extract_scenario_ids(test_plan)
-
-        if self._client:
-            prompt = (
-                f"Target URL: {target_url}\n"
-                f"Requested Persona Count: {bounded_count}\n"
-                f"Available Scenario IDs: {', '.join(scenario_ids)}\n"
-                f"Application Context: {(app_context or 'Standard web application')[:3000]}\n\n"
-                "Generate diverse QA personas including a happy-path user, an edge-case/chaos explorer, "
-                "and an accessibility/keyboard navigator. Ensure all credentials in synthetic_data are clearly synthetic."
-            )
-            try:
-                suite = self._invoke_gemini(prompt)
-                suite.target_url = target_url
-                return suite
-            except Exception as exc:
-                logger.warning("[PersonaAgent] Gemini generation failed, using deterministic fallback: %s", exc)
-
-        return self._build_fallback_personas(target_url, scenario_ids, bounded_count)
+        """Execute the compiled LangGraph persona workflow and return PersonaSuiteResult."""
+        result_state = self._graph.invoke(
+            {
+                "target_url": target_url,
+                "app_context": app_context,
+                "test_plan": test_plan,
+                "count": count,
+            }
+        )
+        return result_state["persona_suite"]
 
     @staticmethod
     def _build_fallback_personas(
@@ -210,7 +263,7 @@ class PersonaAgent:
         )
 
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph-compatible node entrypoint for persona generation."""
+        """LangGraph parent-graph node entrypoint for persona generation."""
         target_url = state.get("target_url", "https://example.com")
         app_context = state.get("app_context") or state.get("dom_summary") or state.get("dom_snapshot")
         test_plan = state.get("test_plan")
