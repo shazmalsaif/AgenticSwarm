@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from html.parser import HTMLParser
-from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-logger = logging.getLogger(__name__)
+from .planner_agent import resolve_chat_model
 
-# Load environment variables from backend/.env if present
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH)
+logger = logging.getLogger(__name__)
 
 
 class BrokenLocatorContext(BaseModel):
@@ -64,7 +59,37 @@ class HealingReport(BaseModel):
     target_url: str = ""
     total_healed: int
     suggestions: list[HealingSuggestion] = Field(default_factory=list)
-    generated_by: str = Field("gemini", description="Origin engine ('gemini' or 'deterministic_fallback')")
+    generated_by: str = Field("langchain", description="Origin engine identifier")
+
+
+class HealingGraphState(TypedDict, total=False):
+    """LangGraph state contract for HealingAgent locator patch synthesis."""
+
+    target_url: str
+    items: list[Any]
+    coerced_items: list[BrokenLocatorContext]
+    healing_report: HealingReport
+
+
+class SwarmGraphState(TypedDict, total=False):
+    """End-to-end multi-agent LangGraph state connecting all 5 AgentSwarm agents."""
+
+    target_url: str
+    dom_summary: Optional[str]
+    dom_snapshot: Optional[str]
+    app_context: Optional[str]
+    objectives: list[str]
+    persona_count: int
+    page: Optional[Any]
+    test_plan: dict[str, Any]
+    personas: dict[str, Any]
+    navigation_results: list[dict[str, Any]]
+    raw_failures: list[dict[str, Any]]
+    triage_report: dict[str, Any]
+    healing_candidates: list[dict[str, Any]]
+    needs_healing: bool
+    healing_report: dict[str, Any]
+    current_agent: str
 
 
 class _InteractiveElementParser(HTMLParser):
@@ -111,16 +136,50 @@ class _InteractiveElementParser(HTMLParser):
 
 class HealingAgent:
     """
-    Self-healing locator synthesis agent.
+    Model-agnostic self-healing locator synthesis agent powered by LangChain & LangGraph.
 
-    Replaces brittle CSS/XPath selectors that broke during DOM refactors with resilient
-    semantic ARIA role locators across Playwright, Cypress, and Selenium.
+    Uses `ChatPromptTemplate | llm.with_structured_output(HealingSuggestion)` inside a
+    compiled LangGraph `StateGraph` (`parse_dom_context -> synthesize_patches`).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None) -> None:
-        self.api_key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-        self.model_name = (model_name or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-        self._client: Optional[genai.Client] = genai.Client(api_key=self.api_key) if self.api_key else None
+    SYSTEM_PROMPT = (
+        "You are the Self-Healing Locator Agent for AgentSwarm. Synthesize resilient, "
+        "semantic ARIA-based locators (preferring getByRole / findByRole) that survive CSS and ID "
+        "refactoring. Output working patches for Playwright, Cypress, and Selenium."
+    )
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        llm: Optional[BaseChatModel] = None,
+    ) -> None:
+        self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
+            model_name=model_name,
+            provider=provider,
+            api_key=api_key,
+            temperature=0.1,
+        )
+        self._prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.SYSTEM_PROMPT),
+                (
+                    "human",
+                    "Failure ID: {failure_id}\n"
+                    "Target URL: {target_url}\n"
+                    "Broken Selector: {failed_selector}\n"
+                    "Action Description: {action_description}\n"
+                    "Element Role Hint: {element_role}\n"
+                    "Accessible Name Hint: {accessible_name}\n"
+                    "Element Text Hint: {element_text}\n"
+                    "Error Message: {error_message}\n"
+                    "DOM Excerpt:\n{dom_excerpt}\n",
+                ),
+            ]
+        )
+        self._chain = (self._prompt | self._llm.with_structured_output(HealingSuggestion)) if self._llm else None
+        self._graph = self.build_healing_graph()
 
     @staticmethod
     def _coerce_context(context: BrokenLocatorContext | dict[str, Any], index: int = 1) -> BrokenLocatorContext:
@@ -133,54 +192,97 @@ class HealingAgent:
         return ctx
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
-    def _invoke_gemini(self, ctx: BrokenLocatorContext) -> HealingSuggestion:
-        if not self._client:
-            raise RuntimeError("Gemini client is not configured.")
+    def _invoke_chain(self, ctx: BrokenLocatorContext) -> HealingSuggestion:
+        if not self._chain:
+            raise RuntimeError("LangChain structured output chain is not configured.")
+        result = self._chain.invoke(
+            {
+                "failure_id": ctx.failure_id or "HEAL-001",
+                "target_url": ctx.target_url,
+                "failed_selector": ctx.failed_selector,
+                "action_description": ctx.action_description or "Interact with UI element",
+                "element_role": ctx.element_role or "N/A",
+                "accessible_name": ctx.accessible_name or "N/A",
+                "element_text": ctx.element_text or "N/A",
+                "error_message": ctx.error_message or "N/A",
+                "dom_excerpt": (ctx.dom_excerpt or "N/A")[:2500],
+            }
+        )
+        if not isinstance(result, HealingSuggestion):
+            result = HealingSuggestion.model_validate(result)
+        result.failure_id = ctx.failure_id or result.failure_id
+        result.failed_selector = ctx.failed_selector
+        return result
 
-        prompt = (
-            f"Failure ID: {ctx.failure_id}\n"
-            f"Target URL: {ctx.target_url}\n"
-            f"Broken Selector: {ctx.failed_selector}\n"
-            f"Action Description: {ctx.action_description or 'Interact with UI element'}\n"
-            f"Element Role Hint: {ctx.element_role}\n"
-            f"Accessible Name Hint: {ctx.accessible_name}\n"
-            f"Element Text Hint: {ctx.element_text}\n"
-            f"Error Message: {ctx.error_message}\n"
-            f"DOM Excerpt:\n{(ctx.dom_excerpt or 'N/A')[:2500]}\n"
+    def _node_parse_dom_context(self, state: HealingGraphState) -> dict[str, Any]:
+        target_url = state.get("target_url", "")
+        raw_items = list(state.get("items") or [])
+        coerced: list[BrokenLocatorContext] = []
+
+        for idx, raw in enumerate(raw_items, start=1):
+            ctx = self._coerce_context(raw, index=idx)
+            if target_url and not ctx.target_url:
+                ctx.target_url = target_url
+            if ctx.dom_excerpt and (not ctx.element_role or not ctx.accessible_name):
+                role, name, _ = self._infer_target_from_dom(ctx)
+                if not ctx.element_role:
+                    ctx.element_role = role
+                if not ctx.accessible_name:
+                    ctx.accessible_name = name
+            coerced.append(ctx)
+
+        return {"coerced_items": coerced}
+
+    def _node_synthesize_patches(self, state: HealingGraphState) -> dict[str, Any]:
+        target_url = state.get("target_url", "")
+        coerced = state.get("coerced_items") or []
+        suggestions: list[HealingSuggestion] = []
+        used_llm = False
+
+        for ctx in coerced:
+            if self._chain:
+                try:
+                    suggestion = self._invoke_chain(ctx)
+                    used_llm = True
+                except Exception as exc:
+                    logger.warning("[HealingAgent] Item %s LangChain synthesis failed, using fallback: %s", ctx.failure_id, exc)
+                    suggestion = self._synthesize_deterministically(ctx)
+            else:
+                suggestion = self._synthesize_deterministically(ctx)
+            suggestions.append(suggestion)
+
+        report = HealingReport(
+            target_url=target_url,
+            total_healed=len(suggestions),
+            suggestions=suggestions,
+            generated_by="langchain" if used_llm else "deterministic_fallback",
         )
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are the Self-Healing Locator Agent for AgentSwarm. Synthesize resilient, "
-                    "semantic ARIA-based locators (preferring getByRole / findByRole) that survive CSS and ID "
-                    "refactoring. Output working patches for Playwright, Cypress, and Selenium."
-                ),
-                response_mime_type="application/json",
-                response_schema=HealingSuggestion,
-                temperature=0.1,
-            ),
-        )
-        if response.parsed is not None and isinstance(response.parsed, HealingSuggestion):
-            suggestion = response.parsed
-            suggestion.failure_id = ctx.failure_id or suggestion.failure_id
-            suggestion.failed_selector = ctx.failed_selector
-            return suggestion
-        suggestion = HealingSuggestion.model_validate_json(response.text)
-        suggestion.failure_id = ctx.failure_id or suggestion.failure_id
-        suggestion.failed_selector = ctx.failed_selector
-        return suggestion
+        return {"healing_report": report}
+
+    def build_healing_graph(self):
+        """Build and compile the internal LangGraph workflow for selector healing."""
+        builder = StateGraph(HealingGraphState)
+        builder.add_node("parse_dom_context", self._node_parse_dom_context)
+        builder.add_node("synthesize_patches", self._node_synthesize_patches)
+
+        builder.add_edge(START, "parse_dom_context")
+        builder.add_edge("parse_dom_context", "synthesize_patches")
+        builder.add_edge("synthesize_patches", END)
+        return builder.compile()
 
     def heal_locator(self, context: BrokenLocatorContext | dict[str, Any]) -> HealingSuggestion:
-        """Generate semantic replacement patches for a single broken selector."""
-        ctx = self._coerce_context(context)
-        if self._client:
-            try:
-                return self._invoke_gemini(ctx)
-            except Exception as exc:
-                logger.warning("[HealingAgent] Gemini synthesis failed, using DOM/ARIA fallback: %s", exc)
-        return self._synthesize_deterministically(ctx)
+        """Synthesize semantic replacement patches for a single broken selector via LangGraph."""
+        result_state = self._graph.invoke({"items": [context], "target_url": ""})
+        return result_state["healing_report"].suggestions[0]
+
+    def heal_batch(
+        self,
+        items: list[BrokenLocatorContext | dict[str, Any]],
+        target_url: str = "",
+    ) -> HealingReport:
+        """Execute the compiled LangGraph healing workflow across a batch of broken locators."""
+        result_state = self._graph.invoke({"items": items, "target_url": target_url})
+        return result_state["healing_report"]
 
     @staticmethod
     def _infer_target_from_dom(ctx: BrokenLocatorContext) -> tuple[str, str, str]:
@@ -255,13 +357,18 @@ class HealingAgent:
             html_tag = "input"
 
         if not name:
-            # Derive clean fallback label from action description or selector tokens
             if ctx.action_description:
-                cleaned = re.sub(r"^(click|press|fill|submit|trigger|open)\s+(the\s+)?", "", ctx.action_description.strip(), flags=re.I)
+                cleaned = re.sub(
+                    r"^(click|press|fill|submit|trigger|open)\s+(the\s+)?",
+                    "",
+                    ctx.action_description.strip(),
+                    flags=re.I,
+                )
                 name = cleaned[:40].strip() or "Submit"
             else:
                 tokens = [
-                    tok for tok in re.findall(r"[a-z]+", ctx.failed_selector.lower())
+                    tok
+                    for tok in re.findall(r"[a-z]+", ctx.failed_selector.lower())
                     if tok not in ("btn", "button", "cta", "v1", "v2", "legacy", "el", "id")
                 ]
                 name = " ".join(tokens).title() or "Continue"
@@ -285,9 +392,15 @@ class HealingAgent:
         cy_action = f"{cy_locator}.type('...');" if role == "textbox" else f"{cy_locator}.click();"
 
         if html_tag == "input":
-            sel_xpath = f"//input[contains(@aria-label, '{escaped_xpath_text}') or contains(@placeholder, '{escaped_xpath_text}')]"
+            sel_xpath = (
+                f"//input[contains(@aria-label, '{escaped_xpath_text}') "
+                f"or contains(@placeholder, '{escaped_xpath_text}')]"
+            )
         else:
-            sel_xpath = f"//{html_tag}[contains(., '{escaped_xpath_text}') or contains(@aria-label, '{escaped_xpath_text}')]"
+            sel_xpath = (
+                f"//{html_tag}[contains(., '{escaped_xpath_text}') "
+                f"or contains(@aria-label, '{escaped_xpath_text}')]"
+            )
         sel_locator = f'By.XPATH, "{sel_xpath}"'
         sel_snippet = (
             f'element = driver.find_element(By.XPATH, "{sel_xpath}")\n'
@@ -324,39 +437,8 @@ class HealingAgent:
             ),
         )
 
-    def heal_batch(
-        self,
-        items: list[BrokenLocatorContext | dict[str, Any]],
-        target_url: str = "",
-    ) -> HealingReport:
-        """Synthesize healing patches for a batch of broken locator contexts."""
-        suggestions: list[HealingSuggestion] = []
-        used_gemini = False
-
-        for idx, raw in enumerate(items, start=1):
-            ctx = self._coerce_context(raw, index=idx)
-            if target_url and not ctx.target_url:
-                ctx.target_url = target_url
-            if self._client:
-                try:
-                    suggestion = self._invoke_gemini(ctx)
-                    used_gemini = True
-                except Exception as exc:
-                    logger.warning("[HealingAgent] Batch item %s Gemini failed, falling back: %s", ctx.failure_id, exc)
-                    suggestion = self._synthesize_deterministically(ctx)
-            else:
-                suggestion = self._synthesize_deterministically(ctx)
-            suggestions.append(suggestion)
-
-        return HealingReport(
-            target_url=target_url,
-            total_healed=len(suggestions),
-            suggestions=suggestions,
-            generated_by="gemini" if used_gemini else "deterministic_fallback",
-        )
-
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph-compatible node entrypoint for locator self-healing."""
+        """LangGraph parent-graph node entrypoint for locator self-healing."""
         target_url = state.get("target_url", "")
         candidates: list[Any] = list(state.get("healing_candidates") or [])
 
@@ -380,3 +462,46 @@ class HealingAgent:
 def healing_node(state: dict[str, Any]) -> dict[str, Any]:
     """Functional LangGraph node wrapper around HealingAgent."""
     return HealingAgent().run_node(state)
+
+
+def build_swarm_graph(
+    llm: Optional[BaseChatModel] = None,
+    provider: Optional[str] = None,
+    model_name: Optional[str] = None,
+    api_key: Optional[str] = None,
+):
+    """
+    Build and compile the end-to-end AgentSwarm LangGraph workflow:
+    planner -> persona -> navigator -> triage --(needs_healing)--> healing -> END
+                                              --(no healing)-----> END
+    """
+    from .navigator_agent import NavigatorAgent
+    from .persona_agent import PersonaAgent
+    from .planner_agent import PlannerAgent
+    from .triage_agent import TriageAgent
+
+    planner = PlannerAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
+    persona = PersonaAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
+    navigator = NavigatorAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
+    triage = TriageAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
+    healing = HealingAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
+
+    def _route_after_triage(state: SwarmGraphState) -> str:
+        if state.get("healing_candidates"):
+            return "healing"
+        return END
+
+    builder = StateGraph(SwarmGraphState)
+    builder.add_node("planner", planner.run_node)
+    builder.add_node("persona", persona.run_node)
+    builder.add_node("navigator", navigator.run_node)
+    builder.add_node("triage", triage.run_node)
+    builder.add_node("healing", healing.run_node)
+
+    builder.add_edge(START, "planner")
+    builder.add_edge("planner", "persona")
+    builder.add_edge("persona", "navigator")
+    builder.add_edge("navigator", "triage")
+    builder.add_conditional_edges("triage", _route_after_triage, {"healing": "healing", END: END})
+    builder.add_edge("healing", END)
+    return builder.compile()
