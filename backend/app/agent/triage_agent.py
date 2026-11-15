@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-logger = logging.getLogger(__name__)
+from .planner_agent import resolve_chat_model
 
-# Load environment variables from backend/.env if present
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH)
+logger = logging.getLogger(__name__)
 
 
 class FailureEvidence(BaseModel):
@@ -63,22 +58,69 @@ class TriageReport(BaseModel):
     total_failures: int
     healing_candidates: int
     diagnoses: list[TriageDiagnosis] = Field(default_factory=list)
-    generated_by: str = Field("gemini", description="Origin engine ('gemini' or 'deterministic_fallback')")
+    generated_by: str = Field("langchain", description="Origin engine identifier")
+
+
+class TriageGraphState(TypedDict, total=False):
+    """LangGraph state contract for TriageAgent workflow."""
+
+    target_url: str
+    raw_failures: list[Any]
+    dom_snapshot: Optional[str]
+    coerced_failures: list[FailureEvidence]
+    triage_report: TriageReport
+    healing_candidates: list[dict[str, Any]]
+    needs_healing: bool
 
 
 class TriageAgent:
     """
-    Root-cause triage agent.
+    Model-agnostic root-cause triage agent powered by LangChain & LangGraph.
 
-    Distinguishes frontend UI selector drift from genuine backend API failures,
-    network timeouts, console exceptions, and functional assertion bugs so downstream
-    self-healing only triggers on true locator regressions.
+    Uses `ChatPromptTemplate | llm.with_structured_output(TriageDiagnosis)` inside a
+    compiled LangGraph `StateGraph` (`collect_failures -> classify_failures -> route_healing_candidates`).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None) -> None:
-        self.api_key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-        self.model_name = (model_name or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-        self._client: Optional[genai.Client] = genai.Client(api_key=self.api_key) if self.api_key else None
+    SYSTEM_PROMPT = (
+        "You are the Diagnosis & Triage Agent for AgentSwarm. Classify each test failure into "
+        "SELECTOR_DRIFT, BACKEND_API_ERROR, NETWORK_TIMEOUT, ASSERTION_FAILURE, or CONSOLE_EXCEPTION. "
+        "Set needs_healing=True and recommended_next_agent='healing_agent' ONLY when the root cause "
+        "is SELECTOR_DRIFT with a broken selector and healthy backend behavior."
+    )
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        llm: Optional[BaseChatModel] = None,
+    ) -> None:
+        self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
+            model_name=model_name,
+            provider=provider,
+            api_key=api_key,
+            temperature=0.1,
+        )
+        self._prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.SYSTEM_PROMPT),
+                (
+                    "human",
+                    "Failure ID: {failure_id}\n"
+                    "Target URL: {target_url}\n"
+                    "Scenario: {scenario_id} - {scenario_title}\n"
+                    "Action Description: {action_description}\n"
+                    "Failed Selector: {failed_selector}\n"
+                    "HTTP Status: {http_status}\n"
+                    "Error Message: {error_message}\n"
+                    "Console Errors: {console_errors}\n"
+                    "Network Failures: {network_failures}\n"
+                    "DOM Excerpt:\n{dom_excerpt}\n",
+                ),
+            ]
+        )
+        self._chain = (self._prompt | self._llm.with_structured_output(TriageDiagnosis)) if self._llm else None
+        self._graph = self.build_triage_graph()
 
     @staticmethod
     def _coerce_evidence(evidence: FailureEvidence | dict[str, Any], index: int = 1) -> FailureEvidence:
@@ -91,54 +133,118 @@ class TriageAgent:
         return item
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
-    def _invoke_gemini(self, item: FailureEvidence) -> TriageDiagnosis:
-        if not self._client:
-            raise RuntimeError("Gemini client is not configured.")
-
-        prompt = (
-            f"Failure ID: {item.failure_id}\n"
-            f"Target URL: {item.target_url}\n"
-            f"Scenario: {item.scenario_id} - {item.scenario_title}\n"
-            f"Action Description: {item.action_description}\n"
-            f"Failed Selector: {item.failed_selector}\n"
-            f"HTTP Status: {item.http_status}\n"
-            f"Error Message: {item.error_message}\n"
-            f"Console Errors: {item.console_errors}\n"
-            f"Network Failures: {item.network_failures}\n"
-            f"DOM Excerpt:\n{(item.dom_excerpt or 'N/A')[:2000]}\n"
+    def _invoke_chain(self, item: FailureEvidence) -> TriageDiagnosis:
+        if not self._chain:
+            raise RuntimeError("LangChain structured output chain is not configured.")
+        result = self._chain.invoke(
+            {
+                "failure_id": item.failure_id or "FAIL-001",
+                "target_url": item.target_url,
+                "scenario_id": item.scenario_id or "N/A",
+                "scenario_title": item.scenario_title or "N/A",
+                "action_description": item.action_description or "N/A",
+                "failed_selector": item.failed_selector or "N/A",
+                "http_status": str(item.http_status) if item.http_status is not None else "N/A",
+                "error_message": item.error_message,
+                "console_errors": str(item.console_errors),
+                "network_failures": str(item.network_failures),
+                "dom_excerpt": (item.dom_excerpt or "N/A")[:2000],
+            }
         )
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are the Diagnosis & Triage Agent for AgentSwarm. Classify each test failure into "
-                    "SELECTOR_DRIFT, BACKEND_API_ERROR, NETWORK_TIMEOUT, ASSERTION_FAILURE, or CONSOLE_EXCEPTION. "
-                    "Set needs_healing=True and recommended_next_agent='healing_agent' ONLY when the root cause "
-                    "is SELECTOR_DRIFT with a broken selector and healthy backend behavior."
-                ),
-                response_mime_type="application/json",
-                response_schema=TriageDiagnosis,
-                temperature=0.1,
-            ),
-        )
-        if response.parsed is not None and isinstance(response.parsed, TriageDiagnosis):
-            diagnosis = response.parsed
-            diagnosis.failure_id = item.failure_id or diagnosis.failure_id
-            return diagnosis
-        diagnosis = TriageDiagnosis.model_validate_json(response.text)
-        diagnosis.failure_id = item.failure_id or diagnosis.failure_id
-        return diagnosis
+        if not isinstance(result, TriageDiagnosis):
+            result = TriageDiagnosis.model_validate(result)
+        result.failure_id = item.failure_id or result.failure_id
+        return result
 
     def triage_failure(self, evidence: FailureEvidence | dict[str, Any]) -> TriageDiagnosis:
         """Analyze a single failure evidence record and return a structured diagnosis."""
         item = self._coerce_evidence(evidence)
-        if self._client:
+        if self._chain:
             try:
-                return self._invoke_gemini(item)
+                return self._invoke_chain(item)
             except Exception as exc:
-                logger.warning("[TriageAgent] Gemini triage failed, using rule engine: %s", exc)
+                logger.warning("[TriageAgent] LangChain triage failed, using rule engine: %s", exc)
         return self._classify_deterministically(item)
+
+    def _node_collect_failures(self, state: TriageGraphState) -> dict[str, Any]:
+        raw_failures = list(state.get("raw_failures") or [])
+        coerced = [self._coerce_evidence(item, index=i) for i, item in enumerate(raw_failures, start=1)]
+        return {"coerced_failures": coerced}
+
+    def _node_classify_failures(self, state: TriageGraphState) -> dict[str, Any]:
+        target_url = state.get("target_url", "")
+        coerced = state.get("coerced_failures") or []
+        diagnoses: list[TriageDiagnosis] = []
+        used_llm = False
+
+        for item in coerced:
+            if self._chain:
+                try:
+                    diag = self._invoke_chain(item)
+                    used_llm = True
+                except Exception as exc:
+                    logger.warning("[TriageAgent] Batch item %s LangChain error, falling back: %s", item.failure_id, exc)
+                    diag = self._classify_deterministically(item)
+            else:
+                diag = self._classify_deterministically(item)
+            diagnoses.append(diag)
+
+        healing_count = sum(1 for d in diagnoses if d.needs_healing)
+        report = TriageReport(
+            target_url=target_url,
+            total_failures=len(diagnoses),
+            healing_candidates=healing_count,
+            diagnoses=diagnoses,
+            generated_by="langchain" if used_llm else "deterministic_fallback",
+        )
+        return {"triage_report": report}
+
+    @staticmethod
+    def _node_route_healing_candidates(state: TriageGraphState) -> dict[str, Any]:
+        target_url = state.get("target_url", "")
+        coerced = state.get("coerced_failures") or []
+        report = state["triage_report"]
+        healing_candidates: list[dict[str, Any]] = []
+
+        for evidence_item, diag in zip(coerced, report.diagnoses):
+            if diag.needs_healing and evidence_item.failed_selector:
+                healing_candidates.append(
+                    {
+                        "failure_id": diag.failure_id,
+                        "failed_selector": evidence_item.failed_selector,
+                        "action_description": evidence_item.action_description,
+                        "dom_excerpt": evidence_item.dom_excerpt or state.get("dom_snapshot"),
+                        "target_url": evidence_item.target_url or target_url,
+                        "error_message": evidence_item.error_message,
+                    }
+                )
+
+        return {
+            "healing_candidates": healing_candidates,
+            "needs_healing": bool(healing_candidates),
+        }
+
+    def build_triage_graph(self):
+        """Build and compile the internal LangGraph workflow for failure triage & healing routing."""
+        builder = StateGraph(TriageGraphState)
+        builder.add_node("collect_failures", self._node_collect_failures)
+        builder.add_node("classify_failures", self._node_classify_failures)
+        builder.add_node("route_healing_candidates", self._node_route_healing_candidates)
+
+        builder.add_edge(START, "collect_failures")
+        builder.add_edge("collect_failures", "classify_failures")
+        builder.add_edge("classify_failures", "route_healing_candidates")
+        builder.add_edge("route_healing_candidates", END)
+        return builder.compile()
+
+    def triage_batch(
+        self,
+        failures: list[FailureEvidence | dict[str, Any]],
+        target_url: str = "",
+    ) -> TriageReport:
+        """Execute the compiled LangGraph triage workflow across a batch of failures."""
+        result_state = self._graph.invoke({"raw_failures": failures, "target_url": target_url})
+        return result_state["triage_report"]
 
     @staticmethod
     def _classify_deterministically(item: FailureEvidence) -> TriageDiagnosis:
@@ -162,7 +268,9 @@ class TriageAgent:
                 evidence_highlights=highlights,
             )
 
-        if item.network_failures and any("500" in nf or "502" in nf or "503" in nf or "400" in nf or "401" in nf or "403" in nf for nf in item.network_failures):
+        if item.network_failures and any(
+            code in nf for nf in item.network_failures for code in ("500", "502", "503", "400", "401", "403")
+        ):
             highlights.extend(item.network_failures[:3])
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
@@ -254,39 +362,8 @@ class TriageAgent:
             evidence_highlights=highlights,
         )
 
-    def triage_batch(
-        self,
-        failures: list[FailureEvidence | dict[str, Any]],
-        target_url: str = "",
-    ) -> TriageReport:
-        """Analyze all failures from a test run and produce a consolidated TriageReport."""
-        diagnoses: list[TriageDiagnosis] = []
-        used_gemini = False
-
-        for idx, raw in enumerate(failures, start=1):
-            item = self._coerce_evidence(raw, index=idx)
-            if self._client:
-                try:
-                    diag = self._invoke_gemini(item)
-                    used_gemini = True
-                except Exception as exc:
-                    logger.warning("[TriageAgent] Batch item %s Gemini error, falling back: %s", item.failure_id, exc)
-                    diag = self._classify_deterministically(item)
-            else:
-                diag = self._classify_deterministically(item)
-            diagnoses.append(diag)
-
-        healing_count = sum(1 for d in diagnoses if d.needs_healing)
-        return TriageReport(
-            target_url=target_url,
-            total_failures=len(diagnoses),
-            healing_candidates=healing_count,
-            diagnoses=diagnoses,
-            generated_by="gemini" if used_gemini else "deterministic_fallback",
-        )
-
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph-compatible node entrypoint for root-cause failure triage."""
+        """LangGraph parent-graph node entrypoint for root-cause failure triage."""
         target_url = state.get("target_url", "")
         raw_failures: list[Any] = list(state.get("raw_failures") or [])
 
@@ -295,26 +372,17 @@ class TriageAgent:
                 if isinstance(nav, dict):
                     raw_failures.extend(nav.get("failures") or [])
 
-        coerced = [self._coerce_evidence(item, index=i) for i, item in enumerate(raw_failures, start=1)]
-        report = self.triage_batch(coerced, target_url=target_url)
-
-        healing_candidates: list[dict[str, Any]] = []
-        for evidence_item, diag in zip(coerced, report.diagnoses):
-            if diag.needs_healing and evidence_item.failed_selector:
-                healing_candidates.append(
-                    {
-                        "failure_id": diag.failure_id,
-                        "failed_selector": evidence_item.failed_selector,
-                        "action_description": evidence_item.action_description,
-                        "dom_excerpt": evidence_item.dom_excerpt or state.get("dom_snapshot") or state.get("dom_summary"),
-                        "target_url": evidence_item.target_url or target_url,
-                        "error_message": evidence_item.error_message,
-                    }
-                )
-
+        result_state = self._graph.invoke(
+            {
+                "raw_failures": raw_failures,
+                "target_url": target_url,
+                "dom_snapshot": state.get("dom_snapshot") or state.get("dom_summary"),
+            }
+        )
         return {
-            "triage_report": report.model_dump(),
-            "healing_candidates": healing_candidates,
+            "triage_report": result_state["triage_report"].model_dump(),
+            "healing_candidates": result_state["healing_candidates"],
+            "needs_healing": result_state["needs_healing"],
             "current_agent": "triage",
         }
 
