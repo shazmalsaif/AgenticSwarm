@@ -1,10 +1,34 @@
+# Web API
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
-sqlalchemy>=2.0.0
-psycopg[binary]>=3.1.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 pyjwt>=2.8.0
 email-validator>=2.0.0
 
+# Database
+sqlalchemy>=2.0.0
+psycopg[binary]>=3.1.0
+pgvector
+
+# AI and agent orchestration
+google-genai
+langgraph
+langchain
+langchain-core
+langchain-google-genai
+
+# Browser automation
+playwright
+
+# Background jobs and caching
+redis
+celery
+
+# HTTP and integrations
+httpx
+PyGithub
+
+# Utilities
+tenacity
