@@ -80,6 +80,8 @@ class FindingResponse(BaseModel):
     needs_healing: bool
     recommended_next_agent: str
     evidence_highlights: list[str] = Field(default_factory=list)
+    console_errors: list[str] = Field(default_factory=list)
+    network_failures: list[str] = Field(default_factory=list)
     dom_excerpt: Optional[str] = None
     action_description: Optional[str] = None
     healing_patch: Optional[dict[str, Any]] = None
@@ -159,6 +161,8 @@ def record_finding_from_run(
         needs_healing=needs_healing,
         recommended_next_agent=str(diag_dict.get("recommended_next_agent", "human_review")),
         evidence_highlights=list(diag_dict.get("evidence_highlights") or []),
+        console_errors=list(ev.console_errors),
+        network_failures=list(ev.network_failures),
         dom_excerpt=ev.dom_excerpt,
         action_description=ev.action_description,
         healing_patch=resolved_patch,
