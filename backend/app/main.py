@@ -12,8 +12,12 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.auth import hash_password, verify_password, create_access_token, decode_access_token
 from app.schemas import UserLogin, UserSignup, UserResponse, TokenResponse, MessageResponse
-from database.connection import get_db, init_db
-from database.models import User
+from app.database.connection import SessionLocal, get_db, init_db
+from app.database.models import User
+from app.api.findings import router as findings_router
+from app.api.projects import router as projects_router
+from app.api.repositories import router as repositories_router
+from app.api.test_runs import router as test_runs_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +31,6 @@ async def lifespan(app: FastAPI):
         print("[AgentSwarm] Database tables verified.")
         
         # Seed a default demo account if no users exist
-        from database.connection import SessionLocal
         db = SessionLocal()
         try:
             demo_user = db.query(User).filter(User.email == "demo@agentswarm.dev").first()
@@ -191,6 +194,14 @@ def health_check(db: Session = Depends(get_db)):
         "database": db_status,
         "version": settings.VERSION
     }
+
+# ---------------------------------------------------------------------------
+# Register AgentSwarm Feature Routers
+# ---------------------------------------------------------------------------
+app.include_router(projects_router)
+app.include_router(repositories_router)
+app.include_router(findings_router)
+app.include_router(test_runs_router)
 
 # ---------------------------------------------------------------------------
 # Serve Frontend Static Assets

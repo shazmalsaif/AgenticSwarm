@@ -38,5 +38,5 @@ def init_db():
         conn.commit()
 
     # Import models so Base registers them before create_all
-    import database.models  # noqa: F401
+    from . import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
