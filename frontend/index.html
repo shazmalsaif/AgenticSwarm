@@ -92,12 +92,13 @@
         </div>
       </a>
       <!-- Center: Nav links -->
-      <nav class="hidden md:flex items-center gap-8 text-xs font-mono tracking-tight text-on-surface-variant">
+      <nav class="hidden md:flex items-center gap-7 text-xs font-mono tracking-tight text-on-surface-variant">
         <a class="hover:text-black transition-colors whitespace-nowrap" href="#platform">Platform</a>
         <a class="hover:text-black transition-colors whitespace-nowrap" href="#how-it-works">Architecture</a>
         <a class="hover:text-black transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
           href="#orchestrator" id="nav-launch-swarm"><span>Launch Your Swarm</span>
           <i class="fa-solid fa-arrow-right text-[10px]"></i></a>
+        <a class="hover:text-black transition-colors whitespace-nowrap font-semibold text-black" href="workspace.html" id="nav-live-workspace">Live Workspace</a>
         <a class="hover:text-black transition-colors whitespace-nowrap" href="#self-healing">Self-Healing</a>
         <a class="hover:text-black transition-colors whitespace-nowrap" href="#security">Security</a>
       </nav>
@@ -110,7 +111,7 @@
           <span>Sign In</span>
         </button>
         <a class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-black text-white text-xs font-mono font-medium hover:bg-neutral-800 transition-all whitespace-nowrap shadow-subtle"
-          href="#cta" id="btn-header-workspace">
+          href="workspace.html" id="btn-header-workspace">
           <span>Launch Workspace</span>
           <i class="fa-solid fa-arrow-right text-[9px]"></i>
         </a>
@@ -195,6 +196,10 @@
                 <span id="btn-deploy-swarm-label">Deploy Swarm</span>
               </button>
             </form>
+            <a class="px-2.5 py-0.5 rounded bg-white border border-border-hairline hover:border-black text-black text-[11px] font-mono font-medium transition-colors inline-flex items-center gap-1 whitespace-nowrap shadow-subtle"
+              href="workspace.html" id="btn-open-workspace">
+              <span>Open Full Workspace &rarr;</span>
+            </a>
           </div>
           <div class="flex items-center gap-3 text-neutral-500 whitespace-nowrap">
             <span class="text-neutral-700 font-medium" id="agents-dispatched-count">5 Agents Dispatched</span>
@@ -771,7 +776,7 @@
         </p>
         <div class="flex flex-col sm:flex-row items-center justify-center gap-3.5 pt-6">
           <a class="w-full sm:w-auto px-8 py-3.5 rounded-lg bg-black text-white font-mono text-xs font-semibold hover:bg-neutral-800 transition-all shadow-subtle"
-            href="#orchestrator" id="btn-cta-workspace">
+            href="workspace.html" id="btn-cta-workspace">
             Launch Workspace Free
           </a>
           <a class="w-full sm:w-auto px-6 py-3.5 rounded-lg bg-surface-container-low border border-border-hairline text-black font-mono text-xs font-medium hover:bg-surface-container transition-all"
