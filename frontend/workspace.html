@@ -160,21 +160,41 @@
 
         <!-- Secondary Options Row -->
         <div class="grid grid-cols-1 md:grid-cols-12 gap-4 pt-2 border-t border-border-hairline">
-          <div class="md:col-span-5 space-y-1.5">
+          <div class="md:col-span-3 space-y-1.5">
             <label for="ws-objectives" class="block text-[11px] font-mono uppercase text-neutral-600">
-              QA Objectives <span class="text-neutral-400">(comma separated, optional)</span>
+              QA Objectives <span class="text-neutral-400">(optional)</span>
             </label>
             <input id="ws-objectives" type="text"
-              placeholder="e.g. Verify primary navigation, test login form, check CTA buttons"
+              placeholder="e.g. Verify navigation, test form, check CTA"
               class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
           </div>
 
           <div class="md:col-span-3 space-y-1.5">
+            <label for="ws-model-select" class="block text-[11px] font-mono uppercase text-neutral-600">
+              AI Model
+            </label>
+            <select id="ws-model-select"
+              class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
+              <option value="google_genai:gemini-2.5-flash" selected>Gemini 2.5 Flash — Fast &amp; Recommended</option>
+              <option value="google_genai:gemini-2.5-pro">Gemini 2.5 Pro — Deep Reasoning</option>
+              <option value="google_genai:gemini-2.0-flash">Gemini 2.0 Flash</option>
+              <option value="openrouter:google/gemini-2.5-flash">OpenRouter • Gemini 2.5 Flash</option>
+              <option value="openrouter:anthropic/claude-3.5-sonnet">OpenRouter • Claude 3.5 Sonnet</option>
+              <option value="openai:gpt-4o-mini">OpenAI • GPT-4o Mini</option>
+              <option value="deterministic:deterministic-fallback">Deterministic DOM Engine (Instant)</option>
+              <option value="custom">Custom Model ID...</option>
+            </select>
+            <input id="ws-custom-model" type="text"
+              placeholder="provider:model-name (e.g. openrouter:meta-llama/llama-3.3-70b-instruct)"
+              class="hidden w-full px-3 py-1.5 rounded-lg border border-border-hairline bg-[#faf9f7] text-[11px] font-mono focus:outline-none focus:border-black">
+          </div>
+
+          <div class="md:col-span-2 space-y-1.5">
             <label for="ws-broken-selector" class="block text-[11px] font-mono uppercase text-neutral-600">
-              Simulate Broken Selector <span class="text-neutral-400">(optional)</span>
+              Broken Selector
             </label>
             <input id="ws-broken-selector" type="text"
-              placeholder="e.g. #legacy_checkout_btn_v1"
+              placeholder="e.g. #legacy_btn_v1"
               class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
           </div>
 
@@ -293,8 +313,142 @@
             <a id="ws-kpi-url" href="https://example.com" target="_blank" rel="noopener noreferrer"
               class="text-black font-semibold hover:underline truncate max-w-[340px]">https://example.com</a>
           </div>
-          <span id="ws-kpi-run-id" class="text-[11px] text-neutral-500">No active run selected</span>
+          <div class="flex items-center gap-2.5 flex-wrap">
+            <span id="ws-kpi-model" class="px-2 py-0.5 rounded bg-[#f4f3f1] border border-border-hairline text-[10px] text-neutral-700">Model: Auto</span>
+            <span id="ws-kpi-run-id" class="text-[11px] text-neutral-500">No active run selected</span>
+          </div>
         </div>
+
+        <!-- Live Agent Browser Video & Screenshot Streaming Window -->
+        <section id="ws-video-window" class="rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
+          <!-- Browser Window Chrome Header -->
+          <div class="px-4 py-2.5 bg-[#f4f3f1] border-b border-border-hairline flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+            <div class="flex items-center gap-2.5">
+              <div class="flex items-center gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-full bg-red-400"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+              </div>
+              <span id="ws-player-live-badge"
+                class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white border border-border-hairline text-[10px] font-bold uppercase text-neutral-700">
+                <span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>
+                STANDBY
+              </span>
+              <span class="font-syne font-bold text-black hidden sm:inline">Agent Browser Video Stream</span>
+            </div>
+
+            <div class="flex-1 min-w-[180px] max-w-md flex items-center gap-2 bg-white px-3 py-1 rounded border border-border-hairline text-[11px]">
+              <i class="fa-solid fa-lock text-[9px] text-emerald-600"></i>
+              <span id="ws-player-url" class="truncate text-neutral-700">https://example.com</span>
+              <span id="ws-player-http" class="ml-auto text-[10px] font-bold text-emerald-700 whitespace-nowrap">READY</span>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <select id="ws-player-scenario-select" aria-label="Filter scenario playback"
+                class="px-2 py-1 rounded border border-border-hairline bg-white text-[11px] font-mono text-neutral-700 focus:outline-none focus:border-black">
+                <option value="ALL">All Scenarios</option>
+              </select>
+              <span id="ws-player-mode-badge"
+                class="px-2 py-0.5 rounded bg-white border border-border-hairline text-[10px] text-neutral-600 uppercase">
+                stream
+              </span>
+            </div>
+          </div>
+
+          <!-- 16:9 Viewport Stage -->
+          <div id="ws-player-viewport" class="relative w-full aspect-video bg-[#111214] overflow-hidden select-none">
+            <!-- Empty Standby Placeholder -->
+            <div id="ws-player-empty" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-neutral-400 space-y-3">
+              <div class="w-12 h-12 rounded-xl bg-white/10 border border-white/15 flex items-center justify-center text-white">
+                <i class="fa-solid fa-film text-lg"></i>
+              </div>
+              <div class="space-y-1 max-w-md">
+                <p class="font-syne font-bold text-sm text-white">Live Agent Execution Video Window</p>
+                <p class="text-xs font-mono text-neutral-400">
+                  Click <strong>Run AgentSwarm on URL</strong> above to watch screenshots stream live as the agent navigates, fills forms, and clicks buttons.
+                </p>
+              </div>
+            </div>
+
+            <!-- Streamed Frame Image -->
+            <img id="ws-player-img" alt="Agent browser live frame" class="hidden w-full h-full object-contain bg-[#f5f5f4]">
+
+            <!-- Native Playwright WebM Video (when recorded) -->
+            <video id="ws-player-video" class="hidden w-full h-full object-contain bg-black" controls playsinline></video>
+
+            <!-- Target Highlight Box -->
+            <div id="ws-player-highlight-box"
+              class="hidden absolute pointer-events-none rounded-md border-2 border-emerald-400 bg-emerald-400/15 shadow-[0_0_0_4px_rgba(0,0,0,0.25)] transition-all duration-300 ease-out z-10">
+            </div>
+
+            <!-- Animated Agent Cursor & Click Ripple -->
+            <div id="ws-player-cursor"
+              class="hidden absolute pointer-events-none transition-all duration-300 ease-out z-20 -translate-x-1 -translate-y-1">
+              <span class="absolute -inset-2 rounded-full bg-emerald-400/35 animate-ping"></span>
+              <span class="relative inline-flex items-center justify-center w-6 h-6 rounded-full bg-black text-white border-2 border-white shadow-lg">
+                <i class="fa-solid fa-arrow-pointer text-[10px]"></i>
+              </span>
+              <span id="ws-player-cursor-label"
+                class="ml-2 px-2 py-0.5 rounded bg-black/90 text-white text-[10px] font-mono font-semibold whitespace-nowrap border border-white/20 shadow">
+                CLICK
+              </span>
+            </div>
+
+            <!-- Bottom HUD Overlay -->
+            <div id="ws-player-hud"
+              class="hidden absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/70 to-transparent px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-white z-20">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <span id="ws-player-hud-step" class="px-2 py-0.5 rounded bg-white/15 text-[10px] font-bold">STEP 0 / 0</span>
+                <span id="ws-player-hud-action" class="px-2 py-0.5 rounded bg-emerald-600 text-[10px] font-bold uppercase">GOTO</span>
+                <span id="ws-player-hud-desc" class="truncate text-neutral-100">Waiting for steps...</span>
+              </div>
+              <span id="ws-player-hud-duration" class="text-[11px] text-neutral-300 whitespace-nowrap">0 ms</span>
+            </div>
+          </div>
+
+          <!-- Playback Controls Bar -->
+          <div class="px-4 py-2.5 bg-[#f4f3f1] border-t border-border-hairline flex flex-wrap items-center gap-3 text-xs font-mono">
+            <div class="flex items-center gap-1.5">
+              <button id="btn-player-prev" type="button" title="Previous Step"
+                class="w-7 h-7 rounded bg-white border border-border-hairline hover:border-black flex items-center justify-center text-neutral-700 hover:text-black transition-colors">
+                <i class="fa-solid fa-backward-step text-[11px]"></i>
+              </button>
+              <button id="btn-player-play" type="button"
+                class="px-3 h-7 rounded bg-black text-white hover:bg-neutral-800 inline-flex items-center gap-1.5 text-[11px] font-semibold transition-colors">
+                <i id="ws-player-play-icon" class="fa-solid fa-play text-[10px]"></i>
+                <span id="ws-player-play-label">Play</span>
+              </button>
+              <button id="btn-player-next" type="button" title="Next Step"
+                class="w-7 h-7 rounded bg-white border border-border-hairline hover:border-black flex items-center justify-center text-neutral-700 hover:text-black transition-colors">
+                <i class="fa-solid fa-forward-step text-[11px]"></i>
+              </button>
+            </div>
+
+            <div class="flex-1 flex items-center gap-2.5 min-w-[160px]">
+              <input id="ws-player-scrubber" type="range" min="0" max="0" value="0" aria-label="Step timeline scrubber"
+                class="w-full accent-black cursor-pointer">
+              <span id="ws-player-counter" class="text-[11px] text-neutral-600 whitespace-nowrap">0 / 0</span>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <select id="ws-player-speed" aria-label="Playback speed"
+                class="px-2 py-1 rounded border border-border-hairline bg-white text-[11px] font-mono text-neutral-700 focus:outline-none">
+                <option value="2000">0.5x</option>
+                <option value="1100" selected>1x</option>
+                <option value="550">2x</option>
+              </select>
+              <button id="btn-player-video-toggle" type="button"
+                class="hidden px-2.5 py-1 rounded border border-border-hairline bg-white hover:border-black text-[11px] font-semibold text-black transition-colors">
+                <i class="fa-solid fa-video text-[10px] mr-1"></i>Raw .webm
+              </button>
+            </div>
+          </div>
+
+          <!-- Interactive Step Filmstrip -->
+          <div id="ws-player-filmstrip" class="px-4 py-2.5 bg-white border-t border-border-hairline flex items-center gap-2 overflow-x-auto text-[11px] font-mono">
+            <span class="text-neutral-400">Step frames will appear here during execution...</span>
+          </div>
+        </section>
 
         <!-- 4 Interactive Tabs Card -->
         <div class="rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
