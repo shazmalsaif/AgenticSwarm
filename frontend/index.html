@@ -184,11 +184,20 @@
               <span id="cluster-status-text">CLUSTER ONLINE</span>
             </span>
             <span class="text-neutral-400 hidden sm:inline">|</span>
-            <form class="inline-flex items-center gap-1.5 text-neutral-600" id="swarm-target-form">
+            <form class="inline-flex items-center gap-1.5 text-neutral-600 flex-wrap sm:flex-nowrap" id="swarm-target-form">
               <label class="whitespace-nowrap" for="target-url-input">Target:</label>
               <input aria-label="Staging URL to test"
-                class="bg-white px-2 py-0.5 rounded border border-border-hairline text-black font-medium text-xs font-mono focus:outline-none focus:border-black transition-colors w-52 sm:w-64"
+                class="bg-white px-2 py-0.5 rounded border border-border-hairline text-black font-medium text-xs font-mono focus:outline-none focus:border-black transition-colors w-44 sm:w-56"
                 id="target-url-input" type="url" value="https://staging.store.nexus">
+              <select aria-label="AI Model for Swarm"
+                class="bg-white px-2 py-0.5 rounded border border-border-hairline text-black font-medium text-[11px] font-mono focus:outline-none focus:border-black transition-colors max-w-[165px]"
+                id="landing-model-select">
+                <option value="google_genai:gemini-2.5-flash" selected>Gemini 2.5 Flash</option>
+                <option value="google_genai:gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="openrouter:google/gemini-2.5-flash">OpenRouter • Gemini 2.5</option>
+                <option value="openai:gpt-4o-mini">OpenAI • GPT-4o Mini</option>
+                <option value="deterministic:deterministic-fallback">Deterministic Engine</option>
+              </select>
               <button
                 class="px-2.5 py-0.5 rounded bg-black text-white text-[11px] font-mono font-medium hover:bg-neutral-800 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
                 id="btn-deploy-swarm" title="Deploy synthetic agent swarm to target URL" type="submit">
