@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html class="light" lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <title>Live QA Workspace — AgentSwarm</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com" rel="preconnect">
+  <link href="https://fonts.gstatic.com" rel="preconnect" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Syne:wght@600;700;800&amp;display=swap"
+    rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "surface": "#faf9f7",
+            "surface-bright": "#faf9f7",
+            "surface-dim": "#dadad8",
+            "surface-container-lowest": "#ffffff",
+            "surface-container-low": "#f4f3f1",
+            "surface-container": "#efeeec",
+            "surface-container-high": "#e9e8e6",
+            "surface-container-highest": "#e3e2e0",
+            "primary": "#000000",
+            "primary-container": "#1b1b1b",
+            "on-primary": "#ffffff",
+            "on-surface": "#1a1c1b",
+            "on-surface-variant": "#5a5c63",
+            "outline": "#7e7576",
+            "outline-variant": "#e2e0dc",
+            "border-hairline": "#e5e3df",
+            "secondary": "#515f74",
+            "accent-green": "#16a34a",
+            "accent-red": "#dc2626"
+          },
+          fontFamily: {
+            display: ['Syne', 'sans-serif'],
+            sans: ['Hanken Grotesk', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace']
+          },
+          boxShadow: {
+            'subtle': '0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px 0 rgba(0, 0, 0, 0.02)',
+            'card': '0 4px 20px -2px rgba(14, 15, 18, 0.05)',
+            'elevation': '0 20px 40px -15px rgba(14, 15, 18, 0.08)'
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="min-h-screen flex flex-col selection:bg-black selection:text-white bg-[#faf9f7] text-[#1a1c1b]">
+  <!-- Top Header -->
+  <header class="sticky top-0 z-40 w-full backdrop-blur-md bg-[#faf9f7]/90 border-b border-border-hairline">
+    <div class="max-w-[1280px] mx-auto px-6 h-16 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-4">
+        <a class="flex items-center gap-2.5" href="index.html">
+          <div class="w-7 h-7 bg-black rounded-lg flex items-center justify-center text-white">
+            <i class="fa-solid fa-diagram-project text-xs"></i>
+          </div>
+          <span class="text-base font-bold font-syne tracking-tight text-black">AgentSwarm</span>
+        </a>
+        <span class="text-neutral-300 hidden sm:inline">/</span>
+        <span
+          class="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded bg-white border border-border-hairline text-neutral-700 font-medium">
+          <i class="fa-solid fa-terminal text-[9px]"></i>
+          LIVE QA WORKSPACE
+        </span>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <a href="index.html"
+          class="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border-hairline bg-white hover:border-black text-xs font-mono text-neutral-700 hover:text-black transition-all">
+          <i class="fa-solid fa-arrow-left text-[10px]"></i>
+          <span>Back to Overview</span>
+        </a>
+        <span id="ws-health-badge"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-border-hairline text-[11px] font-mono text-neutral-700 shadow-subtle">
+          <span id="ws-health-dot" class="w-2 h-2 rounded-full bg-amber-400"></span>
+          <span id="ws-health-text">Checking API...</span>
+        </span>
+        <div class="flex items-center gap-2.5" id="auth-nav-container">
+          <button
+            class="hidden sm:inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-neutral-300 bg-white hover:border-black text-xs font-mono font-semibold text-black shadow-subtle hover:bg-neutral-50 transition-all whitespace-nowrap"
+            id="btn-signin" type="button">
+            <i class="fa-regular fa-user text-[11px] text-neutral-600"></i>
+            <span>Sign In</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-[1280px] w-full mx-auto px-6 py-8 space-y-8">
+    <!-- URL Input & Swarm Control Panel -->
+    <section class="rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
+      <div
+        class="px-6 py-4 bg-[#f4f3f1] border-b border-border-hairline flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <span class="text-[10px] font-mono uppercase tracking-widest text-neutral-500">Multi-Agent LangGraph Mission Control</span>
+          <h1 class="font-syne text-xl sm:text-2xl font-bold text-black mt-0.5">
+            Paste Any Website Link to Run Autonomous QA
+          </h1>
+        </div>
+        <span class="text-[11px] font-mono text-neutral-600 bg-white px-3 py-1.5 rounded border border-border-hairline">
+          Planner &rarr; Persona &rarr; Navigator &rarr; Triage &rarr; Healing
+        </span>
+      </div>
+
+      <form id="workspace-launch-form" class="p-6 space-y-5 grid-fine">
+        <!-- Primary URL Bar -->
+        <div class="space-y-2">
+          <label for="ws-target-url" class="block text-xs font-mono font-semibold uppercase tracking-wider text-neutral-700">
+            Target Website URL
+          </label>
+          <div class="flex flex-col md:flex-row gap-3">
+            <div class="relative flex-1">
+              <span class="absolute inset-y-0 left-3.5 flex items-center text-neutral-400 pointer-events-none">
+                <i class="fa-solid fa-globe text-sm"></i>
+              </span>
+              <input id="ws-target-url" type="text" required
+                placeholder="https://example.com or paste any website link..."
+                value="https://example.com"
+                class="w-full pl-10 pr-4 py-3 rounded-lg border border-neutral-300 bg-white text-sm font-mono text-black focus:outline-none focus:border-black focus:ring-1 focus:ring-black transition-all shadow-subtle">
+            </div>
+            <button id="btn-ws-run" type="submit"
+              class="px-6 py-3 rounded-lg bg-black text-white font-mono text-xs font-semibold hover:bg-neutral-800 transition-all inline-flex items-center justify-center gap-2 shadow-subtle whitespace-nowrap">
+              <i class="fa-solid fa-bolt text-[11px]"></i>
+              <span id="btn-ws-run-label">Run AgentSwarm on URL</span>
+            </button>
+            <button id="btn-ws-plan-only" type="button"
+              class="px-5 py-3 rounded-lg bg-white border border-border-hairline hover:border-black text-black font-mono text-xs font-medium transition-all inline-flex items-center justify-center gap-2 shadow-subtle whitespace-nowrap">
+              <i class="fa-solid fa-list-check text-[11px] text-neutral-600"></i>
+              <span id="btn-ws-plan-label">Generate Test Plan Only</span>
+            </button>
+          </div>
+          <!-- Preset URL Pills -->
+          <div class="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-mono">
+            <span class="text-neutral-500">Quick try:</span>
+            <button type="button" data-preset-url="https://example.com"
+              class="ws-preset-url px-2.5 py-1 rounded bg-[#f4f3f1] hover:bg-black hover:text-white border border-border-hairline text-neutral-700 transition-colors">
+              https://example.com
+            </button>
+            <button type="button" data-preset-url="https://staging.store.nexus/checkout"
+              class="ws-preset-url px-2.5 py-1 rounded bg-[#f4f3f1] hover:bg-black hover:text-white border border-border-hairline text-neutral-700 transition-colors">
+              https://staging.store.nexus/checkout
+            </button>
+            <button type="button" data-preset-url="https://httpbin.org/forms/post"
+              class="ws-preset-url px-2.5 py-1 rounded bg-[#f4f3f1] hover:bg-black hover:text-white border border-border-hairline text-neutral-700 transition-colors">
+              https://httpbin.org/forms/post
+            </button>
+          </div>
+        </div>
+
+        <!-- Secondary Options Row -->
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4 pt-2 border-t border-border-hairline">
+          <div class="md:col-span-5 space-y-1.5">
+            <label for="ws-objectives" class="block text-[11px] font-mono uppercase text-neutral-600">
+              QA Objectives <span class="text-neutral-400">(comma separated, optional)</span>
+            </label>
+            <input id="ws-objectives" type="text"
+              placeholder="e.g. Verify primary navigation, test login form, check CTA buttons"
+              class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
+          </div>
+
+          <div class="md:col-span-3 space-y-1.5">
+            <label for="ws-broken-selector" class="block text-[11px] font-mono uppercase text-neutral-600">
+              Simulate Broken Selector <span class="text-neutral-400">(optional)</span>
+            </label>
+            <input id="ws-broken-selector" type="text"
+              placeholder="e.g. #legacy_checkout_btn_v1"
+              class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
+          </div>
+
+          <div class="md:col-span-2 space-y-1.5">
+            <label for="ws-persona-count" class="block text-[11px] font-mono uppercase text-neutral-600">
+              Personas
+            </label>
+            <select id="ws-persona-count"
+              class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
+              <option value="2">2 Personas</option>
+              <option value="3" selected>3 Personas</option>
+              <option value="4">4 Personas</option>
+              <option value="5">5 Personas</option>
+            </select>
+          </div>
+
+          <div class="md:col-span-2 flex items-end pb-1">
+            <label class="inline-flex items-center gap-2 cursor-pointer select-none text-xs font-mono text-neutral-700 bg-white px-3 py-2 rounded-lg border border-border-hairline w-full">
+              <input id="ws-live-browser" type="checkbox" checked
+                class="rounded border-neutral-300 text-black focus:ring-black">
+              <span>Live Site Fetch</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Status / Alert Banner -->
+        <div id="ws-status-banner" class="hidden rounded-lg px-4 py-3 text-xs font-mono border"></div>
+      </form>
+    </section>
+
+    <!-- Live 5-Agent Pipeline Strip -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5" id="ws-pipeline-strip">
+      <div class="ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all" data-stage-index="0">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-black font-semibold">01</span>
+          <span id="ws-stage-badge-0" class="text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600">IDLE</span>
+        </div>
+        <h3 class="text-xs font-bold font-syne text-black">Planner Agent</h3>
+        <p id="ws-stage-stat-0" class="text-[11px] font-mono text-neutral-500 mt-1">Builds scenarios from live DOM</p>
+      </div>
+
+      <div class="ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all" data-stage-index="1">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-black font-semibold">02</span>
+          <span id="ws-stage-badge-1" class="text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600">IDLE</span>
+        </div>
+        <h3 class="text-xs font-bold font-syne text-black">Persona Agent</h3>
+        <p id="ws-stage-stat-1" class="text-[11px] font-mono text-neutral-500 mt-1">Synthesizes user behaviors</p>
+      </div>
+
+      <div class="ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all" data-stage-index="2">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-black font-semibold">03</span>
+          <span id="ws-stage-badge-2" class="text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600">IDLE</span>
+        </div>
+        <h3 class="text-xs font-bold font-syne text-black">Navigator Agent</h3>
+        <p id="ws-stage-stat-2" class="text-[11px] font-mono text-neutral-500 mt-1">Playwright runner &amp; traces</p>
+      </div>
+
+      <div class="ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all" data-stage-index="3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-black font-semibold">04</span>
+          <span id="ws-stage-badge-3" class="text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600">IDLE</span>
+        </div>
+        <h3 class="text-xs font-bold font-syne text-black">Triage Agent</h3>
+        <p id="ws-stage-stat-3" class="text-[11px] font-mono text-neutral-500 mt-1">Root-cause classification</p>
+      </div>
+
+      <div class="ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all" data-stage-index="4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 font-semibold">05</span>
+          <span id="ws-stage-badge-4" class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800">IDLE</span>
+        </div>
+        <h3 class="text-xs font-bold font-syne text-black">Healing Agent</h3>
+        <p id="ws-stage-stat-4" class="text-[11px] font-mono text-neutral-500 mt-1">ARIA self-healing locators</p>
+      </div>
+    </section>
+
+    <!-- Main Dashboard Split: Results Left (9 cols) + Run History Right (3 cols) -->
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <!-- Results Column -->
+      <div class="lg:col-span-8 xl:col-span-9 space-y-6" id="ws-results-section">
+        <!-- KPI Summary Row -->
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <div class="p-4 rounded-xl bg-white border border-border-hairline shadow-subtle">
+            <span class="text-[10px] font-mono uppercase text-neutral-500">Run Status</span>
+            <div class="mt-1.5">
+              <span id="ws-kpi-status"
+                class="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-mono font-bold bg-[#f4f3f1] text-neutral-700">
+                READY
+              </span>
+            </div>
+          </div>
+          <div class="p-4 rounded-xl bg-white border border-border-hairline shadow-subtle">
+            <span class="text-[10px] font-mono uppercase text-neutral-500">Scenarios</span>
+            <p id="ws-kpi-scenarios" class="font-syne text-2xl font-bold text-black mt-1">0</p>
+          </div>
+          <div class="p-4 rounded-xl bg-white border border-border-hairline shadow-subtle">
+            <span class="text-[10px] font-mono uppercase text-neutral-500">Personas</span>
+            <p id="ws-kpi-personas" class="font-syne text-2xl font-bold text-black mt-1">0</p>
+          </div>
+          <div class="p-4 rounded-xl bg-white border border-border-hairline shadow-subtle">
+            <span class="text-[10px] font-mono uppercase text-neutral-500">Trace Steps</span>
+            <p id="ws-kpi-steps" class="font-syne text-2xl font-bold text-black mt-1">0</p>
+          </div>
+          <div class="p-4 rounded-xl bg-white border border-border-hairline shadow-subtle col-span-2 sm:col-span-1">
+            <span class="text-[10px] font-mono uppercase text-neutral-500">Healed / Findings</span>
+            <p id="ws-kpi-healed" class="font-syne text-2xl font-bold text-emerald-700 mt-1">0 / 0</p>
+          </div>
+        </div>
+
+        <!-- Target Metadata Strip -->
+        <div class="px-4 py-2.5 rounded-lg bg-white border border-border-hairline flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-neutral-500">Target:</span>
+            <a id="ws-kpi-url" href="https://example.com" target="_blank" rel="noopener noreferrer"
+              class="text-black font-semibold hover:underline truncate max-w-[340px]">https://example.com</a>
+          </div>
+          <span id="ws-kpi-run-id" class="text-[11px] text-neutral-500">No active run selected</span>
+        </div>
+
+        <!-- 4 Interactive Tabs Card -->
+        <div class="rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
+          <div class="px-4 pt-3 bg-[#f4f3f1] border-b border-border-hairline flex flex-wrap items-center gap-1.5 text-xs font-mono">
+            <button type="button" data-ws-tab="plan"
+              class="ws-tab-btn px-3.5 py-2 rounded-t-lg font-semibold bg-white text-black border border-b-0 border-border-hairline">
+              1. Test Plan &amp; Scenarios
+            </button>
+            <button type="button" data-ws-tab="personas"
+              class="ws-tab-btn px-3.5 py-2 rounded-t-lg font-medium text-neutral-600 hover:text-black">
+              2. User Personas
+            </button>
+            <button type="button" data-ws-tab="traces"
+              class="ws-tab-btn px-3.5 py-2 rounded-t-lg font-medium text-neutral-600 hover:text-black">
+              3. Browser Execution &amp; Traces
+            </button>
+            <button type="button" data-ws-tab="healing"
+              class="ws-tab-btn px-3.5 py-2 rounded-t-lg font-medium text-neutral-600 hover:text-black">
+              4. Triage &amp; Self-Healing
+            </button>
+          </div>
+
+          <div class="p-6">
+            <!-- Tab 1: Plan -->
+            <div id="tab-panel-plan" class="ws-tab-panel space-y-4">
+              <p class="text-xs font-mono text-neutral-500">
+                Paste any website URL above and click <strong>Run AgentSwarm on URL</strong> or <strong>Generate Test Plan Only</strong> to see AI-planned scenarios and steps here.
+              </p>
+            </div>
+
+            <!-- Tab 2: Personas -->
+            <div id="tab-panel-personas" class="ws-tab-panel hidden space-y-4">
+              <p class="text-xs font-mono text-neutral-500">
+                Generated user personas will appear here after running AgentSwarm.
+              </p>
+            </div>
+
+            <!-- Tab 3: Traces -->
+            <div id="tab-panel-traces" class="ws-tab-panel hidden space-y-4">
+              <p class="text-xs font-mono text-neutral-500">
+                Step-by-step Playwright runner actions, selectors, timings, and captured DOM summary appear here.
+              </p>
+            </div>
+
+            <!-- Tab 4: Healing + Standalone Quick Heal Tool -->
+            <div id="tab-panel-healing" class="ws-tab-panel hidden space-y-6">
+              <div id="ws-triage-healing-output" class="space-y-4">
+                <p class="text-xs font-mono text-neutral-500">
+                  No failures or broken selectors triaged in the current run. You can also enter a selector in <strong>Simulate Broken Selector</strong> above or test the standalone Healing Agent below.
+                </p>
+              </div>
+
+              <!-- Quick Heal Locator Interactive Form -->
+              <div class="pt-5 border-t border-border-hairline space-y-3">
+                <h3 class="font-syne text-sm font-bold text-black">
+                  Standalone Self-Healing Locator Tester
+                </h3>
+                <form id="ws-quick-heal-form" class="grid grid-cols-1 sm:grid-cols-12 gap-3 text-xs font-mono">
+                  <input id="ws-qh-selector" type="text" required placeholder="Broken selector e.g. #checkout_btn_v1"
+                    class="sm:col-span-4 px-3 py-2 rounded-lg border border-border-hairline bg-[#faf9f7] focus:outline-none focus:border-black">
+                  <input id="ws-qh-action" type="text" placeholder="Action intent e.g. Click Proceed to Checkout"
+                    class="sm:col-span-5 px-3 py-2 rounded-lg border border-border-hairline bg-[#faf9f7] focus:outline-none focus:border-black">
+                  <button type="submit"
+                    class="sm:col-span-3 px-4 py-2 rounded-lg bg-black text-white font-semibold hover:bg-neutral-800 transition-colors">
+                    Heal Selector
+                  </button>
+                </form>
+                <div id="ws-qh-result" class="hidden"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Run History Sidebar -->
+      <aside class="lg:col-span-4 xl:col-span-3 rounded-xl border border-border-hairline bg-white shadow-card overflow-hidden">
+        <div class="px-4 py-3 bg-[#f4f3f1] border-b border-border-hairline flex items-center justify-between text-xs font-mono">
+          <span class="font-semibold text-black uppercase tracking-wider">Recent Swarm Runs</span>
+          <button id="btn-ws-refresh-history" type="button" title="Refresh history"
+            class="text-neutral-600 hover:text-black px-1.5 py-0.5 rounded hover:bg-white transition-colors">
+            <i class="fa-solid fa-rotate-right text-[11px]"></i>
+          </button>
+        </div>
+        <div id="ws-history-list" class="divide-y divide-border-hairline max-h-[680px] overflow-y-auto text-xs font-mono">
+          <div class="p-4 text-neutral-500">Loading recent runs...</div>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <!-- Authentication Modal (Shared with index.html) -->
+  <div id="auth-modal-backdrop" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 backdrop-blur-sm p-4" aria-hidden="true">
+    <div class="w-full max-w-md rounded-xl bg-white border border-border-hairline shadow-elevation overflow-hidden text-left font-sans">
+      <div class="px-5 py-3.5 bg-[#f4f3f1] border-b border-border-hairline flex items-center justify-between text-xs font-mono">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span class="font-semibold text-black uppercase tracking-wider">WORKSPACE AUTHENTICATION</span>
+        </div>
+        <button id="btn-close-auth-modal" type="button" aria-label="Close modal" class="text-neutral-500 hover:text-black transition-colors px-1.5 py-0.5 rounded">
+          <i class="fa-solid fa-xmark text-sm"></i>
+        </button>
+      </div>
+      <div class="p-6 space-y-5">
+        <div class="grid grid-cols-2 rounded-lg bg-[#f4f3f1] p-1 border border-border-hairline text-xs font-mono">
+          <button id="tab-login" type="button" class="py-1.5 rounded-md font-semibold bg-white text-black shadow-subtle transition-all text-center">Sign In</button>
+          <button id="tab-signup" type="button" class="py-1.5 rounded-md font-medium text-neutral-600 hover:text-black transition-all text-center">Create Account</button>
+        </div>
+        <div id="auth-alert" class="hidden rounded-lg p-3 text-xs font-mono border"><span id="auth-alert-text"></span></div>
+        <form id="auth-form" class="space-y-4">
+          <div id="field-fullname-wrapper" class="space-y-1.5 hidden">
+            <label for="auth-fullname" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Full Name</label>
+            <input id="auth-fullname" type="text" placeholder="QA Engineer" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+          <div class="space-y-1.5">
+            <label for="auth-email" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Work Email</label>
+            <input id="auth-email" type="email" required placeholder="engineer@nexus.io" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+          <div class="space-y-1.5">
+            <label for="auth-password" class="block text-[11px] font-mono uppercase text-neutral-600 tracking-wider">Password</label>
+            <input id="auth-password" type="password" required placeholder="••••••••••••" class="w-full px-3 py-2 rounded border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black transition-colors">
+          </div>
+          <button id="btn-auth-submit" type="submit" class="w-full py-2.5 rounded-lg bg-black text-white hover:bg-neutral-800 text-xs font-mono font-medium transition-all flex items-center justify-center gap-2 shadow-subtle">
+            <span id="auth-submit-label">Sign In to Swarm</span>
+            <i class="fa-solid fa-arrow-right text-[10px]"></i>
+          </button>
+        </form>
+        <div class="pt-3 border-t border-border-hairline flex items-center justify-between text-[11px] font-mono text-neutral-500">
+          <span>Testing database?</span>
+          <button id="btn-use-demo-creds" type="button" class="text-black font-semibold hover:underline inline-flex items-center gap-1">
+            <i class="fa-solid fa-key text-[9px]"></i> Use Demo Credentials
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+
+</html>
