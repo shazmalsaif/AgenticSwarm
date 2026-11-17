@@ -377,6 +377,77 @@ const AgentSwarm = {
   },
 
   // -----------------------------------------------------------------------
+  // 4B. AI Model Catalog & Selection Helpers
+  // -----------------------------------------------------------------------
+  models: {
+    catalog: null,
+
+    parseSelection(selectId = 'ws-model-select', customInputId = 'ws-custom-model') {
+      const sel = document.getElementById(selectId);
+      let raw = (sel?.value || '').trim();
+      if (raw === 'custom') {
+        const customEl = document.getElementById(customInputId);
+        raw = (customEl?.value || '').trim();
+      }
+      if (!raw) return { provider: null, model_name: null };
+      if (raw.includes(':')) {
+        const idx = raw.indexOf(':');
+        return {
+          provider: raw.slice(0, idx).trim() || null,
+          model_name: raw.slice(idx + 1).trim() || null
+        };
+      }
+      return { provider: null, model_name: raw };
+    },
+
+    async loadModels() {
+      const wsSelect = document.getElementById('ws-model-select');
+      const landingSelect = document.getElementById('landing-model-select');
+      if (!wsSelect && !landingSelect) return;
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/test-runs/models`);
+        if (!res.ok) return;
+        const data = await res.json();
+        this.catalog = data;
+        const models = Array.isArray(data.models) ? data.models : [];
+        if (!models.length) return;
+
+        const defaultId = `${data.default_provider}:${data.default_model}`;
+
+        if (wsSelect) {
+          const prevVal = wsSelect.value;
+          const optionsHtml = models.map((m) => {
+            const suffix = m.configured ? '' : ' (Add API Key in .env)';
+            return `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label + suffix)}</option>`;
+          }).join('') + '<option value="custom">Custom Model ID...</option>';
+          wsSelect.innerHTML = optionsHtml;
+          if (prevVal && [...wsSelect.options].some((o) => o.value === prevVal)) {
+            wsSelect.value = prevVal;
+          } else if ([...wsSelect.options].some((o) => o.value === defaultId)) {
+            wsSelect.value = defaultId;
+          }
+        }
+
+        if (landingSelect) {
+          const prevVal = landingSelect.value;
+          landingSelect.innerHTML = models.map((m) => {
+            const shortLabel = m.label.replace(' — Fast & Recommended', '').replace(' — Deep Reasoning', '');
+            return `<option value="${escapeHtml(m.id)}">${escapeHtml(shortLabel)}</option>`;
+          }).join('');
+          if (prevVal && [...landingSelect.options].some((o) => o.value === prevVal)) {
+            landingSelect.value = prevVal;
+          } else if ([...landingSelect.options].some((o) => o.value === defaultId)) {
+            landingSelect.value = defaultId;
+          }
+        }
+      } catch (_) {
+        // Retain static fallback options if backend is offline
+      }
+    }
+  },
+
+  // -----------------------------------------------------------------------
   // 5. Swarm Execution & Headless Orchestrator API
   // -----------------------------------------------------------------------
   swarm: {
@@ -392,6 +463,7 @@ const AgentSwarm = {
     async deploySwarm(rawUrl) {
       const url = normalizeTargetUrl(rawUrl, 'https://staging.store.nexus');
       this.state.targetUrl = url;
+      const modelChoice = AgentSwarm.models.parseSelection('landing-model-select');
 
       const urlInput = document.getElementById('target-url-input');
       if (urlInput) urlInput.value = url;
@@ -431,7 +503,9 @@ const AgentSwarm = {
             target_url: url,
             persona_count: 3,
             use_live_browser: true,
-            record_traces: true
+            record_traces: true,
+            provider: modelChoice.provider,
+            model_name: modelChoice.model_name
           })
         });
 
@@ -752,7 +826,413 @@ const AgentSwarm = {
       runsHistory: [],
       projectMap: {},
       lastQuickHeal: null,
-      animIntervalId: null
+      animIntervalId: null,
+      activeEventSource: null,
+      streamPollId: null
+    },
+
+    player: {
+      allFrames: [],
+      filteredFrames: [],
+      currentIndex: 0,
+      isPlaying: false,
+      playTimerId: null,
+      speedMs: 1100,
+      scenarioFilter: 'ALL',
+      videoUrls: [],
+      showRawVideo: false,
+      isLive: false,
+      seenIndices: new Set(),
+
+      bindControls() {
+        document.getElementById('btn-player-play')?.addEventListener('click', () => this.togglePlay());
+        document.getElementById('btn-player-prev')?.addEventListener('click', () => {
+          this.pause();
+          this.goTo(this.currentIndex - 1);
+        });
+        document.getElementById('btn-player-next')?.addEventListener('click', () => {
+          this.pause();
+          this.goTo(this.currentIndex + 1);
+        });
+        document.getElementById('ws-player-scrubber')?.addEventListener('input', (e) => {
+          this.pause();
+          this.goTo(parseInt(e.target.value, 10) || 0);
+        });
+        document.getElementById('ws-player-speed')?.addEventListener('change', (e) => {
+          this.speedMs = parseInt(e.target.value, 10) || 1100;
+          if (this.isPlaying) {
+            this.pause();
+            this.play();
+          }
+        });
+        document.getElementById('ws-player-scenario-select')?.addEventListener('change', (e) => {
+          this.scenarioFilter = e.target.value || 'ALL';
+          this.applyFilter(true);
+        });
+        document.getElementById('btn-player-video-toggle')?.addEventListener('click', () => {
+          this.showRawVideo = !this.showRawVideo;
+          this.updateVideoModeUI();
+        });
+      },
+
+      setBadge(mode, text) {
+        const badge = document.getElementById('ws-player-live-badge');
+        if (!badge) return;
+        if (mode === 'live') {
+          badge.className = 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-50 border border-red-200 text-[10px] font-bold uppercase text-red-700';
+          badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-red-600 animate-ping"></span>${escapeHtml(text)}`;
+        } else if (mode === 'ready') {
+          badge.className = 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[10px] font-bold uppercase text-emerald-800';
+          badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>${escapeHtml(text)}`;
+        } else {
+          badge.className = 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white border border-border-hairline text-[10px] font-bold uppercase text-neutral-700';
+          badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>${escapeHtml(text)}`;
+        }
+      },
+
+      startLiveStream(targetUrl) {
+        this.pause();
+        this.allFrames = [];
+        this.filteredFrames = [];
+        this.currentIndex = 0;
+        this.scenarioFilter = 'ALL';
+        this.videoUrls = [];
+        this.showRawVideo = false;
+        this.isLive = true;
+        this.seenIndices = new Set();
+
+        this.setBadge('live', 'LIVE STREAMING');
+        const urlEl = document.getElementById('ws-player-url');
+        if (urlEl) urlEl.textContent = targetUrl || '';
+        const httpEl = document.getElementById('ws-player-http');
+        if (httpEl) httpEl.textContent = 'CONNECTING';
+
+        document.getElementById('ws-player-empty')?.classList.remove('hidden');
+        document.getElementById('ws-player-img')?.classList.add('hidden');
+        document.getElementById('ws-player-video')?.classList.add('hidden');
+        document.getElementById('ws-player-cursor')?.classList.add('hidden');
+        document.getElementById('ws-player-highlight-box')?.classList.add('hidden');
+        document.getElementById('ws-player-hud')?.classList.add('hidden');
+        document.getElementById('btn-player-video-toggle')?.classList.add('hidden');
+
+        this.populateScenarioSelect();
+        this.renderFilmstrip();
+        this.updateControlsCounter();
+      },
+
+      appendLiveFrame(frame) {
+        if (!frame) return;
+        const fIdx = frame.frame_index;
+        if (fIdx !== undefined && this.seenIndices.has(fIdx)) return;
+        if (fIdx !== undefined) this.seenIndices.add(fIdx);
+
+        this.allFrames.push(frame);
+        this.populateScenarioSelect();
+        this.applyFilter(false);
+        // Jump immediately to the latest incoming frame while live streaming
+        this.goTo(this.filteredFrames.length - 1);
+      },
+
+      loadFromRun(run) {
+        this.pause();
+        this.isLive = false;
+        this.showRawVideo = false;
+        this.seenIndices = new Set();
+
+        const frames = [];
+        const navResults = run?.navigation_results || [];
+        const traceArtifacts = run?.trace_artifacts || [];
+        const traceMap = {};
+        traceArtifacts.forEach((tr) => {
+          if (tr.trace_id) traceMap[tr.trace_id] = tr;
+        });
+
+        navResults.forEach((nr) => {
+          const steps = nr.steps || [];
+          const total = steps.length;
+          const trEvents = nr.trace_id && traceMap[nr.trace_id] ? (traceMap[nr.trace_id].events || []) : [];
+          steps.forEach((st, idx) => {
+            if (st.status === 'skipped') return;
+            const trEv = trEvents[idx] || {};
+            const shot = st.screenshot_b64 || trEv.screenshot_b64 || null;
+            const tBox = st.target_box || trEv.target_box || null;
+            frames.push({
+              frame_index: frames.length,
+              scenario_id: nr.scenario_id,
+              scenario_title: nr.scenario_title,
+              step_number: st.step_number,
+              total_steps: total,
+              action_type: st.action?.action_type || 'step',
+              selector: st.used_fallback_selector || st.action?.selector || null,
+              value: st.action?.value || null,
+              description: st.action?.description || st.action?.selector || '',
+              status: st.status,
+              duration_ms: st.duration_ms || 0,
+              current_url: st.current_url || nr.target_url || run.target_url || '',
+              error_message: st.error_message || null,
+              screenshot_b64: shot,
+              target_box: tBox,
+              execution_mode: nr.execution_mode || 'simulated'
+            });
+          });
+        });
+
+        this.allFrames = frames;
+        this.videoUrls = Array.isArray(run?.video_urls) ? run.video_urls : [];
+        this.scenarioFilter = 'ALL';
+        this.populateScenarioSelect();
+        this.applyFilter(false);
+        this.updateVideoModeUI();
+
+        if (this.filteredFrames.length) {
+          this.setBadge('ready', `REPLAY READY • ${this.filteredFrames.length} FRAMES`);
+          this.goTo(0);
+        } else {
+          this.setBadge('standby', 'NO FRAMES');
+          document.getElementById('ws-player-empty')?.classList.remove('hidden');
+          document.getElementById('ws-player-img')?.classList.add('hidden');
+          document.getElementById('ws-player-hud')?.classList.add('hidden');
+          document.getElementById('ws-player-cursor')?.classList.add('hidden');
+          document.getElementById('ws-player-highlight-box')?.classList.add('hidden');
+          this.renderFilmstrip();
+          this.updateControlsCounter();
+        }
+      },
+
+      populateScenarioSelect() {
+        const sel = document.getElementById('ws-player-scenario-select');
+        if (!sel) return;
+        const seen = new Map();
+        this.allFrames.forEach((f) => {
+          if (f.scenario_id && !seen.has(f.scenario_id)) {
+            seen.set(f.scenario_id, f.scenario_title || f.scenario_id);
+          }
+        });
+        const prev = this.scenarioFilter;
+        let html = '<option value="ALL">All Scenarios</option>';
+        seen.forEach((title, id) => {
+          html += `<option value="${escapeHtml(id)}">${escapeHtml(id)} — ${escapeHtml(String(title).slice(0, 32))}</option>`;
+        });
+        sel.innerHTML = html;
+        if (prev !== 'ALL' && seen.has(prev)) {
+          sel.value = prev;
+        } else {
+          this.scenarioFilter = 'ALL';
+          sel.value = 'ALL';
+        }
+      },
+
+      applyFilter(resetToStart = true) {
+        if (this.scenarioFilter === 'ALL') {
+          this.filteredFrames = [...this.allFrames];
+        } else {
+          this.filteredFrames = this.allFrames.filter((f) => f.scenario_id === this.scenarioFilter);
+        }
+        this.renderFilmstrip();
+        this.updateControlsCounter();
+        if (resetToStart && this.filteredFrames.length) {
+          this.goTo(0);
+        }
+      },
+
+      updateVideoModeUI() {
+        const toggleBtn = document.getElementById('btn-player-video-toggle');
+        const videoEl = document.getElementById('ws-player-video');
+        const imgEl = document.getElementById('ws-player-img');
+        const cursorEl = document.getElementById('ws-player-cursor');
+        const boxEl = document.getElementById('ws-player-highlight-box');
+        const hudEl = document.getElementById('ws-player-hud');
+
+        if (toggleBtn) {
+          toggleBtn.classList.toggle('hidden', !this.videoUrls.length);
+          toggleBtn.innerHTML = this.showRawVideo
+            ? '<i class="fa-solid fa-images text-[10px] mr-1"></i>Frame Stream'
+            : '<i class="fa-solid fa-video text-[10px] mr-1"></i>Raw .webm';
+        }
+
+        if (this.showRawVideo && this.videoUrls.length && videoEl) {
+          const fullUrl = this.videoUrls[0].startsWith('http') ? this.videoUrls[0] : `${API_BASE_URL}${this.videoUrls[0]}`;
+          if (videoEl.src !== fullUrl) videoEl.src = fullUrl;
+          videoEl.classList.remove('hidden');
+          imgEl?.classList.add('hidden');
+          cursorEl?.classList.add('hidden');
+          boxEl?.classList.add('hidden');
+          hudEl?.classList.add('hidden');
+        } else {
+          videoEl?.classList.add('hidden');
+          if (this.filteredFrames.length) {
+            this.renderFrame(this.currentIndex);
+          }
+        }
+      },
+
+      renderFilmstrip() {
+        const strip = document.getElementById('ws-player-filmstrip');
+        if (!strip) return;
+        if (!this.filteredFrames.length) {
+          strip.innerHTML = '<span class="text-neutral-400">Step frames will appear here during execution...</span>';
+          return;
+        }
+        strip.innerHTML = this.filteredFrames.map((f, idx) => {
+          const isErr = f.status === 'failed';
+          const isActive = idx === this.currentIndex;
+          const cls = isActive
+            ? 'bg-black text-white border-black'
+            : isErr
+              ? 'bg-red-50 text-red-800 border-red-200 hover:border-red-500'
+              : 'bg-[#faf9f7] text-neutral-700 border-border-hairline hover:border-black';
+          return `
+            <button type="button" data-frame-idx="${idx}"
+              class="ws-filmstrip-pill shrink-0 px-2.5 py-1 rounded border text-[10px] font-mono font-medium transition-all flex items-center gap-1.5 ${cls}">
+              <span class="font-bold">#${idx + 1}</span>
+              <span class="uppercase">${escapeHtml(f.action_type)}</span>
+              <span class="opacity-75 truncate max-w-[110px]">${escapeHtml(f.selector || f.scenario_id || '')}</span>
+            </button>
+          `;
+        }).join('');
+
+        strip.querySelectorAll('.ws-filmstrip-pill').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            this.pause();
+            this.goTo(parseInt(btn.getAttribute('data-frame-idx'), 10) || 0);
+          });
+        });
+      },
+
+      updateControlsCounter() {
+        const scrubber = document.getElementById('ws-player-scrubber');
+        const counter = document.getElementById('ws-player-counter');
+        const total = this.filteredFrames.length;
+        if (scrubber) {
+          scrubber.max = String(Math.max(0, total - 1));
+          scrubber.value = String(Math.min(this.currentIndex, Math.max(0, total - 1)));
+        }
+        if (counter) {
+          counter.textContent = total ? `${this.currentIndex + 1} / ${total}` : '0 / 0';
+        }
+      },
+
+      goTo(idx) {
+        if (!this.filteredFrames.length) return;
+        const clamped = Math.max(0, Math.min(idx, this.filteredFrames.length - 1));
+        this.currentIndex = clamped;
+        this.renderFrame(clamped);
+      },
+
+      renderFrame(idx) {
+        const frame = this.filteredFrames[idx];
+        if (!frame) return;
+
+        const emptyEl = document.getElementById('ws-player-empty');
+        const imgEl = document.getElementById('ws-player-img');
+        const hudEl = document.getElementById('ws-player-hud');
+        const cursorEl = document.getElementById('ws-player-cursor');
+        const cursorLbl = document.getElementById('ws-player-cursor-label');
+        const boxEl = document.getElementById('ws-player-highlight-box');
+
+        emptyEl?.classList.add('hidden');
+        if (!this.showRawVideo) {
+          if (imgEl && frame.screenshot_b64) {
+            imgEl.src = frame.screenshot_b64;
+            imgEl.classList.remove('hidden');
+          }
+          hudEl?.classList.remove('hidden');
+        }
+
+        const setTxt = (id, txt) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = txt;
+        };
+        setTxt('ws-player-url', frame.current_url || '');
+        setTxt('ws-player-http', frame.status === 'failed' ? 'FAILED' : 'OK');
+        setTxt('ws-player-mode-badge', frame.execution_mode || 'stream');
+        setTxt('ws-player-hud-step', `${frame.scenario_id || 'RUN'} • STEP ${frame.step_number || (idx + 1)}/${frame.total_steps || this.filteredFrames.length}`);
+
+        const actionBadge = document.getElementById('ws-player-hud-action');
+        if (actionBadge) {
+          actionBadge.textContent = String(frame.action_type || 'STEP').toUpperCase();
+          actionBadge.className = frame.status === 'failed'
+            ? 'px-2 py-0.5 rounded bg-red-600 text-[10px] font-bold uppercase'
+            : 'px-2 py-0.5 rounded bg-emerald-600 text-[10px] font-bold uppercase';
+        }
+
+        const descTxt = frame.description || frame.selector || frame.value || 'Executing step...';
+        setTxt('ws-player-hud-desc', frame.error_message ? `${descTxt} — ${frame.error_message}` : descTxt);
+        setTxt('ws-player-hud-duration', `${Number(frame.duration_ms || 0).toFixed(0)} ms`);
+
+        // Animate target highlight box & cursor pointer
+        const tBox = frame.target_box;
+        if (!this.showRawVideo && tBox && typeof tBox.x_pct === 'number') {
+          if (boxEl) {
+            boxEl.style.left = `${tBox.x_pct}%`;
+            boxEl.style.top = `${tBox.y_pct}%`;
+            boxEl.style.width = `${tBox.w_pct || 18}%`;
+            boxEl.style.height = `${tBox.h_pct || 8}%`;
+            boxEl.className = frame.status === 'failed'
+              ? 'absolute pointer-events-none rounded-md border-2 border-red-500 bg-red-500/15 shadow-[0_0_0_4px_rgba(220,38,38,0.2)] transition-all duration-300 ease-out z-10'
+              : 'absolute pointer-events-none rounded-md border-2 border-emerald-400 bg-emerald-400/15 shadow-[0_0_0_4px_rgba(22,163,74,0.2)] transition-all duration-300 ease-out z-10';
+          }
+          if (cursorEl) {
+            const cx = Math.min(94, tBox.x_pct + (tBox.w_pct || 16) * 0.55);
+            const cy = Math.min(90, tBox.y_pct + (tBox.h_pct || 8) * 0.55);
+            cursorEl.style.left = `${cx}%`;
+            cursorEl.style.top = `${cy}%`;
+            cursorEl.classList.remove('hidden');
+          }
+          if (cursorLbl) {
+            const act = String(frame.action_type || 'ACTION').toUpperCase();
+            const targetHint = frame.selector || frame.value || '';
+            cursorLbl.textContent = targetHint ? `${act} ${String(targetHint).slice(0, 26)}` : act;
+          }
+        } else {
+          boxEl?.classList.add('hidden');
+          cursorEl?.classList.add('hidden');
+        }
+
+        this.updateControlsCounter();
+        this.renderFilmstrip();
+      },
+
+      togglePlay() {
+        if (this.isPlaying) {
+          this.pause();
+        } else {
+          this.play();
+        }
+      },
+
+      play() {
+        if (!this.filteredFrames.length) return;
+        if (this.currentIndex >= this.filteredFrames.length - 1) {
+          this.goTo(0);
+        }
+        this.isPlaying = true;
+        const icon = document.getElementById('ws-player-play-icon');
+        const label = document.getElementById('ws-player-play-label');
+        if (icon) icon.className = 'fa-solid fa-pause text-[10px]';
+        if (label) label.textContent = 'Pause';
+
+        if (this.playTimerId) clearInterval(this.playTimerId);
+        this.playTimerId = setInterval(() => {
+          if (this.currentIndex < this.filteredFrames.length - 1) {
+            this.goTo(this.currentIndex + 1);
+          } else {
+            this.pause();
+          }
+        }, this.speedMs);
+      },
+
+      pause() {
+        this.isPlaying = false;
+        if (this.playTimerId) {
+          clearInterval(this.playTimerId);
+          this.playTimerId = null;
+        }
+        const icon = document.getElementById('ws-player-play-icon');
+        const label = document.getElementById('ws-player-play-label');
+        if (icon) icon.className = 'fa-solid fa-play text-[10px]';
+        if (label) label.textContent = 'Play';
+      }
     },
 
     init() {
@@ -760,6 +1240,7 @@ const AgentSwarm = {
       if (!launchForm) return;
 
       this.checkHealth();
+      this.player.bindControls();
       this.bindEvents();
       this.initFromQueryParams();
       this.loadHistory();
@@ -770,6 +1251,14 @@ const AgentSwarm = {
       launchForm?.addEventListener('submit', (e) => {
         e.preventDefault();
         this.runSwarmFromWorkspace();
+      });
+
+      const modelSelect = document.getElementById('ws-model-select');
+      const customModelInput = document.getElementById('ws-custom-model');
+      modelSelect?.addEventListener('change', () => {
+        if (customModelInput) {
+          customModelInput.classList.toggle('hidden', modelSelect.value !== 'custom');
+        }
       });
 
       const planOnlyBtn = document.getElementById('btn-ws-plan-only');
@@ -859,35 +1348,97 @@ const AgentSwarm = {
       });
     },
 
-    startPipelineAnimation() {
-      let step = 0;
-      const setStage = (activeIdx) => {
-        document.querySelectorAll('.ws-stage-card').forEach((card, idx) => {
-          const badge = document.getElementById(`ws-stage-badge-${idx}`);
-          if (idx === activeIdx) {
-            card.className = 'ws-stage-card bg-white p-4 rounded-xl border-2 border-black shadow-subtle transition-all';
-            if (badge) {
-              badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-black text-white font-semibold';
-              badge.textContent = 'RUNNING';
-            }
-          } else {
-            card.className = 'ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all';
-            if (badge) {
-              badge.className = idx < activeIdx
-                ? 'text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium'
-                : 'text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600';
-              badge.textContent = idx < activeIdx ? 'DONE' : 'QUEUED';
-            }
+    setStageActive(activeIdx, message = null) {
+      document.querySelectorAll('.ws-stage-card').forEach((card, idx) => {
+        const badge = document.getElementById(`ws-stage-badge-${idx}`);
+        const stat = document.getElementById(`ws-stage-stat-${idx}`);
+        if (idx === activeIdx) {
+          card.className = 'ws-stage-card bg-white p-4 rounded-xl border-2 border-black shadow-subtle transition-all';
+          if (badge) {
+            badge.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-black text-white font-semibold';
+            badge.textContent = 'RUNNING';
           }
-        });
-      };
+          if (stat && message) stat.textContent = message;
+        } else {
+          card.className = 'ws-stage-card bg-white p-4 rounded-xl border border-border-hairline shadow-subtle transition-all';
+          if (badge) {
+            badge.className = idx < activeIdx
+              ? 'text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium'
+              : 'text-[10px] font-mono px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-600';
+            badge.textContent = idx < activeIdx ? 'DONE' : 'QUEUED';
+          }
+        }
+      });
+    },
 
-      setStage(0);
-      if (this.state.animIntervalId) clearInterval(this.state.animIntervalId);
-      this.state.animIntervalId = setInterval(() => {
-        step = (step + 1) % 5;
-        setStage(step);
-      }, 650);
+    startPipelineAnimation() {
+      this.setStageActive(0);
+    },
+
+    stopStreamListeners() {
+      if (this.state.activeEventSource) {
+        try {
+          this.state.activeEventSource.close();
+        } catch (_) {}
+        this.state.activeEventSource = null;
+      }
+      if (this.state.streamPollId) {
+        clearInterval(this.state.streamPollId);
+        this.state.streamPollId = null;
+      }
+    },
+
+    connectLiveStream(streamId, targetUrl) {
+      this.stopStreamListeners();
+      this.player.startLiveStream(targetUrl);
+
+      if (typeof EventSource !== 'undefined') {
+        try {
+          const es = new EventSource(`${API_BASE_URL}/api/test-runs/stream/${encodeURIComponent(streamId)}`);
+          this.state.activeEventSource = es;
+
+          es.addEventListener('stage', (ev) => {
+            try {
+              const payload = JSON.parse(ev.data);
+              if (typeof payload.stage_index === 'number') {
+                this.setStageActive(payload.stage_index, payload.message);
+              }
+            } catch (_) {}
+          });
+
+          es.addEventListener('frame', (ev) => {
+            try {
+              const frame = JSON.parse(ev.data);
+              this.player.appendLiveFrame(frame);
+            } catch (_) {}
+          });
+
+          es.addEventListener('complete', () => {
+            this.stopStreamListeners();
+          });
+
+          es.onerror = () => {
+            // Polling fallback below keeps frames flowing if SSE closes early
+          };
+        } catch (_) {}
+      }
+
+      this.state.streamPollId = setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/test-runs/stream-state/${encodeURIComponent(streamId)}`);
+          if (!res.ok) return;
+          const st = await res.json();
+          if (typeof st.stage_index === 'number' && st.status === 'running') {
+            this.setStageActive(st.stage_index, st.stage_message);
+          }
+          if (Array.isArray(st.frames)) {
+            st.frames.forEach((fr) => this.player.appendLiveFrame(fr));
+          }
+          if (st.status === 'completed' || st.status === 'failed') {
+            this.stopStreamListeners();
+          }
+        } catch (_) {}
+      }, 450);
     },
 
     stopPipelineAnimation(run) {
@@ -895,6 +1446,7 @@ const AgentSwarm = {
         clearInterval(this.state.animIntervalId);
         this.state.animIntervalId = null;
       }
+      this.stopStreamListeners();
       const scenarios = run?.test_plan?.scenarios || [];
       const personas = run?.personas?.personas || [];
       const traces = run?.trace_artifacts || [];
@@ -934,6 +1486,7 @@ const AgentSwarm = {
       const personaCount = parseInt(document.getElementById('ws-persona-count')?.value || '3', 10);
       const useLiveBrowser = Boolean(document.getElementById('ws-live-browser')?.checked);
       const brokenSelector = (document.getElementById('ws-broken-selector')?.value || '').trim();
+      const modelChoice = AgentSwarm.models.parseSelection('ws-model-select', 'ws-custom-model');
 
       const rawFailures = [];
       if (brokenSelector) {
@@ -952,18 +1505,28 @@ const AgentSwarm = {
         });
       }
 
-      return { targetUrl, objectives, personaCount, useLiveBrowser, rawFailures };
+      return {
+        targetUrl,
+        objectives,
+        personaCount,
+        useLiveBrowser,
+        rawFailures,
+        provider: modelChoice.provider,
+        modelName: modelChoice.model_name
+      };
     },
 
     async runSwarmFromWorkspace() {
-      const { targetUrl, objectives, personaCount, useLiveBrowser, rawFailures } = this.parseWorkspaceInputs();
+      const { targetUrl, objectives, personaCount, useLiveBrowser, rawFailures, provider, modelName } = this.parseWorkspaceInputs();
       const runBtn = document.getElementById('btn-ws-run');
       const runLabel = document.getElementById('btn-ws-run-label');
+      const streamId = 'stm-' + Math.random().toString(36).slice(2, 10);
 
       if (runBtn) runBtn.disabled = true;
-      if (runLabel) runLabel.textContent = 'Running Swarm...';
-      this.showBanner(`Deploying 5-agent LangGraph swarm against ${targetUrl}...`, 'info');
+      if (runLabel) runLabel.textContent = 'Streaming Swarm...';
+      this.showBanner(`Streaming 5-agent LangGraph swarm against ${targetUrl} (${modelName || 'default model'})...`, 'info');
       this.startPipelineAnimation();
+      this.connectLiveStream(streamId, targetUrl);
 
       try {
         const res = await fetch(`${API_BASE_URL}/api/test-runs`, {
@@ -976,7 +1539,9 @@ const AgentSwarm = {
             persona_count: personaCount,
             use_live_browser: useLiveBrowser,
             record_traces: true,
-            raw_failures: rawFailures
+            provider,
+            model_name: modelName,
+            stream_id: streamId
           })
         });
         const data = await res.json();
@@ -988,7 +1553,7 @@ const AgentSwarm = {
         this.stopPipelineAnimation(data);
         this.renderRunResult(data);
         this.showBanner(
-          `Completed run ${data.id} on ${data.target_url} • Status: ${String(data.status).toUpperCase()} • ${data.scenarios_count} scenarios, ${data.failures_count} failures, ${data.healed_count} healed.`,
+          `Completed run ${data.id} on ${data.target_url} • Model: ${data.model_name || 'auto'} • Status: ${String(data.status).toUpperCase()} • ${data.scenarios_count} scenarios, ${data.failures_count} failures, ${data.healed_count} healed.`,
           data.status === 'failed' ? 'error' : 'success'
         );
         await this.loadHistory();
@@ -1002,7 +1567,7 @@ const AgentSwarm = {
     },
 
     async generatePlanOnly() {
-      const { targetUrl, objectives, personaCount } = this.parseWorkspaceInputs();
+      const { targetUrl, objectives, personaCount, useLiveBrowser, provider, modelName } = this.parseWorkspaceInputs();
       const planBtn = document.getElementById('btn-ws-plan-only');
       const planLabel = document.getElementById('btn-ws-plan-label');
 
@@ -1043,7 +1608,10 @@ const AgentSwarm = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             objectives: objectives.length ? objectives : null,
-            persona_count: personaCount
+            persona_count: personaCount,
+            provider,
+            model_name: modelName,
+            use_live_browser: useLiveBrowser
           })
         });
         const preview = await res.json();
@@ -1055,6 +1623,8 @@ const AgentSwarm = {
           id: 'plan-preview',
           project_id: preview.project_id,
           target_url: preview.target_url,
+          provider: preview.provider,
+          model_name: preview.model_name,
           status: 'passed',
           scenarios_count: (preview.test_plan?.scenarios || []).length,
           personas_count: (preview.personas?.personas || []).length,
@@ -1107,11 +1677,17 @@ const AgentSwarm = {
       setTxt('ws-kpi-steps', String(totalSteps));
       setTxt('ws-kpi-healed', `${run.healed_count ?? 0} / ${run.failures_count ?? 0}`);
       setTxt('ws-kpi-run-id', isPlanPreview ? 'Preview Only (not saved to run history)' : `Run ID: ${run.id}`);
+      const modelLabel = run.model_name ? `${run.provider || 'llm'}:${run.model_name}` : 'Auto';
+      setTxt('ws-kpi-model', `Model: ${modelLabel}`);
 
       const kpiUrl = document.getElementById('ws-kpi-url');
       if (kpiUrl) {
         kpiUrl.textContent = run.target_url || '';
         kpiUrl.href = run.target_url || '#';
+      }
+
+      if (!isPlanPreview) {
+        this.player.loadFromRun(run);
       }
 
       this.renderPlanTab(run.test_plan || {});
@@ -1220,6 +1796,7 @@ const AgentSwarm = {
         if (tr.trace_id) traceMap[tr.trace_id] = tr;
       });
 
+      let frameCursor = 0;
       container.innerHTML = navResults.map((nr) => {
         const trace = nr.trace_id ? traceMap[nr.trace_id] : null;
         const stepsHtml = (nr.steps || []).map((st) => {
@@ -1228,8 +1805,10 @@ const AgentSwarm = {
             : st.status === 'failed'
               ? 'bg-red-50 text-red-800 border-red-200'
               : 'bg-neutral-100 text-neutral-600 border-border-hairline';
+          const playIdx = st.status !== 'skipped' ? frameCursor++ : -1;
           return `
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded bg-[#faf9f7] border border-border-hairline text-xs font-mono">
+            <div ${playIdx >= 0 ? `data-play-step-idx="${playIdx}" title="Click to jump video window to this step"` : ''}
+              class="ws-trace-step-row flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded bg-[#faf9f7] border border-border-hairline text-xs font-mono ${playIdx >= 0 ? 'cursor-pointer hover:border-black transition-colors' : ''}">
               <div class="flex items-center gap-2.5 min-w-0">
                 <span class="px-2 py-0.5 rounded border text-[10px] font-semibold uppercase ${badgeCls}">${escapeHtml(st.status)}</span>
                 <span class="font-semibold text-black">${escapeHtml(st.action?.action_type || 'step')}</span>
@@ -1237,6 +1816,7 @@ const AgentSwarm = {
               </div>
               <div class="flex items-center gap-3 text-[11px] text-neutral-500 whitespace-nowrap">
                 ${st.used_fallback_selector ? `<span class="text-emerald-700">fallback: ${escapeHtml(st.used_fallback_selector)}</span>` : ''}
+                ${playIdx >= 0 ? '<span class="text-[10px] text-black font-semibold"><i class="fa-solid fa-play mr-1 text-[8px]"></i>View</span>' : ''}
                 <span>${Number(st.duration_ms || 0).toFixed(1)} ms</span>
               </div>
             </div>
@@ -1259,6 +1839,19 @@ const AgentSwarm = {
           </div>
         `;
       }).join('');
+
+      container.querySelectorAll('.ws-trace-step-row[data-play-step-idx]').forEach((row) => {
+        row.addEventListener('click', () => {
+          const idx = parseInt(row.getAttribute('data-play-step-idx'), 10);
+          if (!Number.isNaN(idx)) {
+            this.player.pause();
+            this.player.scenarioFilter = 'ALL';
+            this.player.applyFilter(false);
+            this.player.goTo(idx);
+            document.getElementById('ws-video-window')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        });
+      });
     },
 
     renderHealingTab(triageReport, healingReport) {
@@ -1359,6 +1952,7 @@ const AgentSwarm = {
       resultBox.innerHTML = '<div class="text-xs font-mono text-neutral-500">Synthesizing semantic locator...</div>';
 
       try {
+        const modelChoice = AgentSwarm.models.parseSelection('ws-model-select', 'ws-custom-model');
         const res = await fetch(`${API_BASE_URL}/api/test-runs/heal-locator`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1366,7 +1960,9 @@ const AgentSwarm = {
             failed_selector: selector,
             action_description: actionDesc || null,
             target_url: targetUrl,
-            dom_excerpt: this.state.currentRun?.config_snapshot?.dom_snapshot || null
+            dom_excerpt: this.state.currentRun?.config_snapshot?.dom_snapshot || null,
+            provider: modelChoice.provider,
+            model_name: modelChoice.model_name
           })
         });
         const data = await res.json();
@@ -1410,6 +2006,7 @@ const AgentSwarm = {
                 <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${statusCls}">${escapeHtml(r.status)}</span>
               </div>
               <div class="text-[11px] text-neutral-600 truncate" title="${escapeHtml(r.target_url)}">${escapeHtml(r.target_url)}</div>
+              ${r.model_name ? `<div class="text-[10px] text-neutral-500 truncate">Model: ${escapeHtml(r.model_name)}</div>` : ''}
               <div class="flex items-center justify-between text-[10px] text-neutral-400">
                 <span>${r.scenarios_count} scenarios • ${r.healed_count} healed</span>
                 <div class="flex items-center gap-2">
@@ -1624,6 +2221,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Check existing session status on page load
   AgentSwarm.auth.checkAuthStatus();
+
+  // Populate AI model dropdowns on landing page or workspace
+  AgentSwarm.models.loadModels();
 
   // Initialize dedicated Live Workspace controller if on workspace.html
   AgentSwarm.workspace.init();
