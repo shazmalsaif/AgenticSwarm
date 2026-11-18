@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..agent.healing_agent import BrokenLocatorContext, HealingAgent, build_swarm_graph
+from ..agent.planner_agent import list_available_models
+from ..browser.playwright_runner import PlaywrightRunner
+from ..browser.trace_manager import get_stream_manager, get_trace_manager
 from .findings import record_finding_from_run
 from .projects import _PROJECTS
 
@@ -30,8 +37,11 @@ class TestRunCreateRequest(BaseModel):
         default_factory=list,
         description="Optional captured runtime failures to triage and heal during this run",
     )
-    provider: Optional[str] = Field(None, description="Optional LangChain provider override (google_genai, openai, openrouter)")
+    provider: Optional[str] = Field(None, description="Optional LangChain provider override (google_genai, openai, openrouter, deterministic)")
     model_name: Optional[str] = Field(None, description="Optional LangChain model override")
+    use_live_browser: bool = Field(True, description="Fetch live site DOM and run Playwright browser")
+    record_traces: bool = Field(True, description="Record execution traces and visual step frames")
+    stream_id: Optional[str] = Field(None, description="Client stream ID for live SSE frame streaming")
 
 
 class QuickHealRequest(BaseModel):
@@ -56,6 +66,8 @@ class TestRunResponse(BaseModel):
     project_id: Optional[str] = None
     target_url: str
     status: TestRunStatus
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
     scenarios_count: int
     personas_count: int
     failures_count: int
@@ -64,6 +76,8 @@ class TestRunResponse(BaseModel):
     test_plan: dict[str, Any]
     personas: dict[str, Any]
     navigation_results: list[dict[str, Any]]
+    trace_artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    video_urls: list[str] = Field(default_factory=list)
     triage_report: dict[str, Any]
     healing_report: Optional[dict[str, Any]] = None
     config_snapshot: dict[str, Any] = Field(default_factory=dict)
@@ -91,22 +105,74 @@ def _resolve_target_url(project_id: Optional[str], explicit_url: Optional[str]) 
     return "https://staging.store.nexus"
 
 
+def _resolve_model_choice(provider: Optional[str], model_name: Optional[str]) -> tuple[str, str]:
+    catalog = list_available_models()
+    resolved_provider = (provider or "").strip()
+    resolved_model = (model_name or "").strip()
+
+    if resolved_model and not resolved_provider and ":" in resolved_model:
+        prefix, rest = resolved_model.split(":", 1)
+        resolved_provider = prefix.strip()
+        resolved_model = rest.strip()
+
+    if not resolved_provider:
+        resolved_provider = str(catalog["default_provider"])
+    if not resolved_model:
+        resolved_model = str(catalog["default_model"])
+    return resolved_provider, resolved_model
+
+
 def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
     run_id = f"run-{uuid4().hex[:8]}"
     resolved_url = _resolve_target_url(payload.project_id, payload.target_url)
+    resolved_provider, resolved_model = _resolve_model_choice(payload.provider, payload.model_name)
+    stream_mgr = get_stream_manager()
 
-    swarm = build_swarm_graph(provider=payload.provider, model_name=payload.model_name)
+    if payload.stream_id:
+        stream_mgr.init_stream(
+            payload.stream_id,
+            target_url=resolved_url,
+            provider=resolved_provider,
+            model_name=resolved_model,
+            run_id=run_id,
+        )
+
+    dom_snapshot = payload.dom_snapshot
+    dom_summary = payload.dom_summary
+    if not dom_snapshot and not dom_summary:
+        captured = PlaywrightRunner().capture_dom_snapshot(
+            target_url=resolved_url,
+            use_live_browser=payload.use_live_browser,
+        )
+        dom_snapshot = captured.get("dom_snapshot")
+        dom_summary = captured.get("dom_summary") or dom_snapshot
+
+    swarm = build_swarm_graph(provider=resolved_provider, model_name=resolved_model)
     initial_state: dict[str, Any] = {
         "target_url": resolved_url,
-        "dom_summary": payload.dom_summary or payload.dom_snapshot,
-        "dom_snapshot": payload.dom_snapshot or payload.dom_summary,
+        "dom_summary": dom_summary or dom_snapshot,
+        "dom_snapshot": dom_snapshot or dom_summary,
         "objectives": list(payload.objectives),
         "persona_count": payload.persona_count,
+        "use_live_browser": payload.use_live_browser,
+        "record_traces": payload.record_traces,
+        "run_id": run_id,
+        "stream_id": payload.stream_id,
     }
     if payload.raw_failures:
         initial_state["raw_failures"] = [dict(f) for f in payload.raw_failures]
 
-    final_state = swarm.invoke(initial_state)
+    try:
+        final_state = swarm.invoke(initial_state)
+    except Exception:
+        if payload.stream_id:
+            stream_mgr.complete_stream(
+                payload.stream_id,
+                run_id=run_id,
+                status="failed",
+                message="AgentSwarm execution failed.",
+            )
+        raise
 
     test_plan = final_state.get("test_plan") or {}
     personas = final_state.get("personas") or {}
@@ -142,11 +208,36 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
     else:
         run_status = "failed"
 
+    trace_artifacts = [t.model_dump() for t in get_trace_manager().list_traces(run_id=run_id)]
+    video_urls = [
+        str(nr["video_url"])
+        for nr in navigation_results
+        if isinstance(nr, dict) and nr.get("video_url")
+    ]
+    for ta in trace_artifacts:
+        if ta.get("video_url") and ta["video_url"] not in video_urls:
+            video_urls.append(str(ta["video_url"]))
+
+    if payload.stream_id:
+        stream_mgr.complete_stream(
+            payload.stream_id,
+            run_id=run_id,
+            status="completed",
+            video_urls=video_urls,
+            message=f"Completed run {run_id} ({run_status.upper()})",
+        )
+
+    config_snapshot = payload.model_dump()
+    if dom_snapshot and not config_snapshot.get("dom_snapshot"):
+        config_snapshot["dom_snapshot"] = dom_snapshot[:12000]
+
     run_record = TestRunResponse(
         id=run_id,
         project_id=payload.project_id,
         target_url=resolved_url,
         status=run_status,
+        provider=resolved_provider,
+        model_name=resolved_model,
         scenarios_count=len(test_plan.get("scenarios") or []),
         personas_count=len(personas.get("personas") or []),
         failures_count=failures_count,
@@ -155,14 +246,85 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
         test_plan=test_plan,
         personas=personas,
         navigation_results=navigation_results,
+        trace_artifacts=trace_artifacts,
+        video_urls=video_urls,
         triage_report=triage_report,
         healing_report=healing_report,
-        config_snapshot=payload.model_dump(),
+        config_snapshot=config_snapshot,
         created_at=datetime.now(timezone.utc),
     )
     with _STORE_LOCK:
         _TEST_RUNS[run_id] = run_record
     return run_record
+
+
+@router.get("/models", summary="List Available AI Models")
+def get_available_models() -> dict[str, Any]:
+    """Return selectable LLM providers and models along with API key readiness."""
+    return list_available_models()
+
+
+@router.get("/stream-state/{stream_id}", summary="Get Live Stream State")
+def get_live_stream_state(stream_id: str) -> dict[str, Any]:
+    """Poll current stage progress and streamed screenshot frames for an active or completed run."""
+    state = get_stream_manager().get_state(stream_id)
+    if state is None:
+        return {
+            "stream_id": stream_id,
+            "status": "pending",
+            "current_stage": "planner",
+            "stage_index": 0,
+            "stage_message": "Initializing AgentSwarm stream...",
+            "frames": [],
+            "video_urls": [],
+        }
+    return state
+
+
+@router.get("/stream/{stream_id}", summary="Stream Live Browser Screenshots (SSE)")
+async def stream_test_run(stream_id: str):
+    """Server-Sent Events endpoint streaming live agent stages and browser step screenshots."""
+
+    async def _event_generator():
+        stream_mgr = get_stream_manager()
+        cursor = 0
+        idle_ticks = 0
+        while idle_ticks < 240:  # up to ~60s at 0.25s poll
+            events, st_status = stream_mgr.get_events_since(stream_id, cursor)
+            if events:
+                idle_ticks = 0
+                for ev in events:
+                    cursor += 1
+                    ev_type = ev.get("type", "message")
+                    payload_json = json.dumps(ev.get("data", {}))
+                    yield f"event: {ev_type}\ndata: {payload_json}\n\n"
+                    if ev_type == "complete":
+                        return
+            else:
+                if st_status in ("completed", "failed"):
+                    return
+                idle_ticks += 1
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/videos/{filename}", summary="Serve Recorded Browser Video")
+def get_recorded_video(filename: str):
+    """Serve a Playwright-recorded .webm video artifact safely by filename."""
+    safe_name = Path(filename).name
+    video_path = get_trace_manager().artifacts_dir / "videos" / safe_name
+    if not video_path.exists() or not video_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Video '{safe_name}' not found")
+    return FileResponse(path=str(video_path), media_type="video/webm", filename=safe_name)
 
 
 @router.get("", response_model=list[TestRunResponse], summary="List Test Runs")
