@@ -44,7 +44,11 @@ class NavigationStepResult(BaseModel):
     failed_selector: Optional[str] = None
     http_status: Optional[int] = None
     console_errors: list[str] = Field(default_factory=list)
+    network_failures: list[str] = Field(default_factory=list)
     dom_excerpt: Optional[str] = None
+    used_fallback_selector: Optional[str] = None
+    screenshot_b64: Optional[str] = None
+    target_box: Optional[dict[str, Any]] = None
 
 
 class NavigationRunResult(BaseModel):
@@ -57,6 +61,8 @@ class NavigationRunResult(BaseModel):
     steps: list[NavigationStepResult] = Field(default_factory=list)
     failures: list[dict[str, Any]] = Field(default_factory=list)
     execution_mode: Literal["playwright", "simulated"] = "simulated"
+    trace_id: Optional[str] = None
+    video_url: Optional[str] = None
 
 
 class NavigatorGraphState(TypedDict, total=False):
@@ -66,6 +72,10 @@ class NavigatorGraphState(TypedDict, total=False):
     scenario: dict[str, Any]
     dom_snapshot: Optional[str]
     page: Optional[Any]
+    use_live_browser: bool
+    record_traces: bool
+    run_id: Optional[str]
+    stream_id: Optional[str]
     planned_actions: list[BrowserAction]
     run_result: NavigationRunResult
 
@@ -221,12 +231,19 @@ class NavigatorAgent:
         return {"planned_actions": actions}
 
     def _node_execute_actions(self, state: NavigatorGraphState) -> dict[str, Any]:
+        from ..browser.playwright_runner import PlaywrightRunConfig, PlaywrightRunner
+
         scenario = state["scenario"]
         scenario_id = str(scenario.get("scenario_id") or "SCN-001")
         scenario_title = str(scenario.get("title") or "Untitled Scenario")
         target_url = state["target_url"]
         actions = state["planned_actions"]
         page = state.get("page")
+        dom_snapshot = state.get("dom_snapshot")
+        use_live_browser = bool(state.get("use_live_browser", False))
+        record_traces = bool(state.get("record_traces", True))
+        run_id = state.get("run_id")
+        stream_id = state.get("stream_id")
 
         if page is not None:
             run_result = self._execute_with_playwright(
@@ -235,14 +252,23 @@ class NavigatorAgent:
                 target_url=target_url,
                 actions=actions,
                 page=page,
+                dom_snapshot=dom_snapshot,
+                stream_id=stream_id,
             )
         else:
-            run_result = self._execute_simulated(
+            runner = PlaywrightRunner()
+            run_result = runner.execute_actions(
                 scenario_id=scenario_id,
                 scenario_title=scenario_title,
                 target_url=target_url,
                 actions=actions,
-                dom_snapshot=state.get("dom_snapshot"),
+                dom_snapshot=dom_snapshot,
+                run_id=run_id,
+                stream_id=stream_id,
+                config=PlaywrightRunConfig(
+                    use_live_browser=use_live_browser,
+                    record_traces=record_traces,
+                ),
             )
         return {"run_result": run_result}
 
@@ -263,6 +289,10 @@ class NavigatorAgent:
         scenario: dict[str, Any],
         dom_snapshot: Optional[str] = None,
         page: Optional[Any] = None,
+        use_live_browser: bool = False,
+        record_traces: bool = True,
+        run_id: Optional[str] = None,
+        stream_id: Optional[str] = None,
     ) -> NavigationRunResult:
         """Execute the compiled LangGraph navigator workflow for one scenario."""
         result_state = self._graph.invoke(
@@ -271,6 +301,10 @@ class NavigatorAgent:
                 "scenario": scenario,
                 "dom_snapshot": dom_snapshot,
                 "page": page,
+                "use_live_browser": use_live_browser,
+                "record_traces": record_traces,
+                "run_id": run_id,
+                "stream_id": stream_id,
             }
         )
         return result_state["run_result"]
@@ -282,10 +316,16 @@ class NavigatorAgent:
         target_url: str,
         actions: list[BrowserAction],
         page: Any,
+        dom_snapshot: Optional[str] = None,
+        stream_id: Optional[str] = None,
     ) -> NavigationRunResult:
+        from ..browser.playwright_runner import PlaywrightRunner
+        from ..browser.trace_manager import get_stream_manager
+
         step_results: list[NavigationStepResult] = []
         failures: list[dict[str, Any]] = []
         failed_already = False
+        total_steps = len(actions)
 
         for action in actions:
             if failed_already:
@@ -320,16 +360,50 @@ class NavigatorAgent:
                         raise AssertionError(f"Expected URL to contain '{expected}', got '{current}'")
 
                 elapsed = round((time.perf_counter() - started) * 1000, 2)
+                current_url = str(getattr(page, "url", target_url))
+                shot_b64, t_box = PlaywrightRunner._highlight_and_capture(
+                    page=page,
+                    action=action,
+                    used_selector=action.selector,
+                    step_number=action.step_number,
+                    total_steps=total_steps,
+                    scenario_title=scenario_title,
+                    target_url=current_url,
+                    status="passed",
+                    dom_snapshot=dom_snapshot,
+                )
                 step_results.append(
                     NavigationStepResult(
                         step_number=action.step_number,
                         action=action,
                         status="passed",
                         duration_ms=elapsed,
-                        current_url=str(getattr(page, "url", target_url)),
+                        current_url=current_url,
                         http_status=http_status,
+                        screenshot_b64=shot_b64,
+                        target_box=t_box,
                     )
                 )
+                if stream_id:
+                    get_stream_manager().push_frame(
+                        stream_id,
+                        {
+                            "scenario_id": scenario_id,
+                            "scenario_title": scenario_title,
+                            "step_number": action.step_number,
+                            "total_steps": total_steps,
+                            "action_type": action.action_type,
+                            "selector": action.selector,
+                            "value": action.value,
+                            "description": action.description,
+                            "status": "passed",
+                            "duration_ms": elapsed,
+                            "current_url": current_url,
+                            "screenshot_b64": shot_b64,
+                            "target_box": t_box,
+                            "execution_mode": "playwright",
+                        },
+                    )
             except Exception as exc:
                 failed_already = True
                 elapsed = round((time.perf_counter() - started) * 1000, 2)
@@ -340,6 +414,18 @@ class NavigatorAgent:
                     pass
                 current_url = str(getattr(page, "url", target_url))
                 err_msg = str(exc)
+                shot_b64, t_box = PlaywrightRunner._highlight_and_capture(
+                    page=page,
+                    action=action,
+                    used_selector=action.selector,
+                    step_number=action.step_number,
+                    total_steps=total_steps,
+                    scenario_title=scenario_title,
+                    target_url=current_url,
+                    status="failed",
+                    dom_snapshot=dom_excerpt or dom_snapshot,
+                    error_message=err_msg,
+                )
                 step_results.append(
                     NavigationStepResult(
                         step_number=action.step_number,
@@ -351,6 +437,8 @@ class NavigatorAgent:
                         failed_selector=action.selector,
                         http_status=http_status,
                         dom_excerpt=dom_excerpt,
+                        screenshot_b64=shot_b64,
+                        target_box=t_box,
                     )
                 )
                 failures.append(
@@ -368,6 +456,27 @@ class NavigatorAgent:
                         "action_description": action.description,
                     }
                 )
+                if stream_id:
+                    get_stream_manager().push_frame(
+                        stream_id,
+                        {
+                            "scenario_id": scenario_id,
+                            "scenario_title": scenario_title,
+                            "step_number": action.step_number,
+                            "total_steps": total_steps,
+                            "action_type": action.action_type,
+                            "selector": action.selector,
+                            "value": action.value,
+                            "description": action.description,
+                            "status": "failed",
+                            "duration_ms": elapsed,
+                            "current_url": current_url,
+                            "error_message": err_msg,
+                            "screenshot_b64": shot_b64,
+                            "target_box": t_box,
+                            "execution_mode": "playwright",
+                        },
+                    )
 
         return NavigationRunResult(
             scenario_id=scenario_id,
@@ -499,6 +608,10 @@ class NavigatorAgent:
         target_url = state.get("target_url", "https://example.com")
         dom_snapshot = state.get("dom_snapshot") or state.get("dom_summary")
         page = state.get("page")
+        use_live_browser = bool(state.get("use_live_browser", False))
+        record_traces = bool(state.get("record_traces", True))
+        run_id = state.get("run_id")
+        stream_id = state.get("stream_id")
 
         test_plan = state.get("test_plan") or {}
         if hasattr(test_plan, "model_dump"):
@@ -516,6 +629,10 @@ class NavigatorAgent:
                 scenario=scenario,
                 dom_snapshot=dom_snapshot,
                 page=page,
+                use_live_browser=use_live_browser,
+                record_traces=record_traces,
+                run_id=run_id,
+                stream_id=stream_id,
             )
             results.append(run_result.model_dump())
             raw_failures.extend(run_result.failures)
