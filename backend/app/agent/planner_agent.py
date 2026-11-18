@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, Optional, TypedDict
 
@@ -22,6 +23,124 @@ if _ENV_PATH.exists():
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+AVAILABLE_MODELS: list[dict[str, str]] = [
+    {
+        "id": "google_genai:gemini-2.5-flash",
+        "provider": "google_genai",
+        "model_name": "gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash — Fast & Recommended",
+    },
+    {
+        "id": "google_genai:gemini-2.5-pro",
+        "provider": "google_genai",
+        "model_name": "gemini-2.5-pro",
+        "label": "Gemini 2.5 Pro — Deep Reasoning",
+    },
+    {
+        "id": "google_genai:gemini-2.0-flash",
+        "provider": "google_genai",
+        "model_name": "gemini-2.0-flash",
+        "label": "Gemini 2.0 Flash",
+    },
+    {
+        "id": "openrouter:google/gemini-2.5-flash",
+        "provider": "openrouter",
+        "model_name": "google/gemini-2.5-flash",
+        "label": "OpenRouter • Gemini 2.5 Flash",
+    },
+    {
+        "id": "openrouter:anthropic/claude-3.5-sonnet",
+        "provider": "openrouter",
+        "model_name": "anthropic/claude-3.5-sonnet",
+        "label": "OpenRouter • Claude 3.5 Sonnet",
+    },
+    {
+        "id": "openrouter:openai/gpt-4o-mini",
+        "provider": "openrouter",
+        "model_name": "openai/gpt-4o-mini",
+        "label": "OpenRouter • GPT-4o Mini",
+    },
+    {
+        "id": "openrouter:deepseek/deepseek-chat",
+        "provider": "openrouter",
+        "model_name": "deepseek/deepseek-chat",
+        "label": "OpenRouter • DeepSeek V3",
+    },
+    {
+        "id": "openai:gpt-4o-mini",
+        "provider": "openai",
+        "model_name": "gpt-4o-mini",
+        "label": "OpenAI • GPT-4o Mini",
+    },
+    {
+        "id": "openai:gpt-4o",
+        "provider": "openai",
+        "model_name": "gpt-4o",
+        "label": "OpenAI • GPT-4o",
+    },
+    {
+        "id": "deterministic:deterministic-fallback",
+        "provider": "deterministic",
+        "model_name": "deterministic-fallback",
+        "label": "Deterministic DOM Engine (Offline / Instant)",
+    },
+]
+
+
+def _get_configured_providers() -> dict[str, bool]:
+    return {
+        "google_genai": bool((os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()),
+        "openrouter": bool((os.getenv("OPENROUTER_API_KEY") or "").strip()),
+        "openai": bool((os.getenv("OPENAI_API_KEY") or "").strip()),
+        "deterministic": True,
+    }
+
+
+def list_available_models() -> dict[str, Any]:
+    """Return catalog of selectable LLM providers/models and local API key readiness."""
+    configured_providers = _get_configured_providers()
+    env_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if env_provider in ("google", "gemini"):
+        env_provider = "google_genai"
+
+    if env_provider and configured_providers.get(env_provider):
+        default_provider = env_provider
+    elif configured_providers["google_genai"]:
+        default_provider = "google_genai"
+    elif configured_providers["openrouter"]:
+        default_provider = "openrouter"
+    elif configured_providers["openai"]:
+        default_provider = "openai"
+    else:
+        default_provider = "deterministic"
+
+    env_model = (os.getenv("LLM_MODEL") or "").strip()
+    if env_model:
+        default_model = env_model
+    elif default_provider == "google_genai":
+        default_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    elif default_provider == "openrouter":
+        default_model = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash").strip()
+    elif default_provider == "openai":
+        default_model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    else:
+        default_model = "deterministic-fallback"
+
+    models_out = [
+        {
+            **entry,
+            "configured": bool(configured_providers.get(entry["provider"], False)),
+        }
+        for entry in AVAILABLE_MODELS
+    ]
+
+    return {
+        "default_provider": default_provider,
+        "default_model": default_model,
+        "configured_providers": configured_providers,
+        "models": models_out,
+    }
+
 
 def resolve_chat_model(
     model_name: Optional[str] = None,
@@ -36,9 +155,31 @@ def resolve_chat_model(
     - google_genai (GOOGLE_API_KEY or GEMINI_API_KEY)
     - openai (OPENAI_API_KEY)
     - openrouter (OPENROUTER_API_KEY via base_url='https://openrouter.ai/api/v1')
+    - deterministic (returns None immediately for offline rule-based execution)
     Returns None if no valid API key is configured so agents can fall back cleanly.
     """
-    raw_provider = (provider or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    parsed_model = (model_name or "").strip() or None
+    parsed_provider = (provider or "").strip().lower() or None
+
+    if parsed_model and not parsed_provider and ":" in parsed_model:
+        prefix, rest = parsed_model.split(":", 1)
+        if prefix.strip().lower() in (
+            "google",
+            "gemini",
+            "google_genai",
+            "openai",
+            "openrouter",
+            "deterministic",
+            "local",
+            "offline",
+        ):
+            parsed_provider = prefix.strip().lower()
+            parsed_model = rest.strip() or None
+
+    if parsed_provider in ("deterministic", "local", "offline") or parsed_model == "deterministic-fallback":
+        return None
+
+    raw_provider = (parsed_provider or os.getenv("LLM_PROVIDER") or "").strip().lower()
     explicit_key = (api_key or "").strip()
 
     if not raw_provider:
@@ -55,7 +196,7 @@ def resolve_chat_model(
         elif os.getenv("OPENAI_API_KEY"):
             raw_provider = "openai"
 
-    if not raw_provider:
+    if not raw_provider or raw_provider in ("deterministic", "local", "offline"):
         return None
 
     try:
@@ -63,7 +204,7 @@ def resolve_chat_model(
             resolved_key = (explicit_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
             if not resolved_key:
                 return None
-            resolved_model = (model_name or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+            resolved_model = (parsed_model or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
             return init_chat_model(
                 resolved_model,
                 model_provider="google_genai",
@@ -76,7 +217,7 @@ def resolve_chat_model(
             if not resolved_key:
                 return None
             resolved_model = (
-                model_name or os.getenv("LLM_MODEL") or os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash"
+                parsed_model or os.getenv("LLM_MODEL") or os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash"
             ).strip()
             return init_chat_model(
                 resolved_model,
@@ -90,7 +231,7 @@ def resolve_chat_model(
             resolved_key = (explicit_key or os.getenv("OPENAI_API_KEY") or "").strip()
             if not resolved_key:
                 return None
-            resolved_model = (model_name or os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+            resolved_model = (parsed_model or os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
             return init_chat_model(
                 resolved_model,
                 model_provider="openai",
@@ -99,7 +240,7 @@ def resolve_chat_model(
             )
 
         # Generic provider pass-through supported by LangChain init_chat_model
-        resolved_model = (model_name or os.getenv("LLM_MODEL") or "").strip()
+        resolved_model = (parsed_model or os.getenv("LLM_MODEL") or "").strip()
         if not resolved_model:
             return None
         kwargs: dict[str, Any] = {"model_provider": raw_provider, "temperature": temperature}
@@ -287,119 +428,272 @@ class PlannerAgent:
         return result_state["test_plan"]
 
     @staticmethod
+    def _extract_dom_candidates(dom_summary: Optional[str]) -> list[dict[str, str]]:
+        """Extract interactive element hints from either raw HTML or BrowserToolkit summary text."""
+        if not dom_summary:
+            return []
+        candidates: list[dict[str, str]] = []
+        if "<" in dom_summary and ">" in dom_summary:
+            try:
+                from ..browser.browser_tools import BrowserToolkit
+
+                for el in BrowserToolkit.extract_interactive_elements(dom_summary):
+                    candidates.append(
+                        {
+                            "tag": el.tag,
+                            "role": el.role,
+                            "name": el.accessible_name or el.text or el.placeholder or el.element_id,
+                            "locator": el.recommended_locator or (f"#{el.element_id}" if el.element_id else el.tag),
+                            "id": el.element_id,
+                        }
+                    )
+            except Exception:
+                pass
+        if not candidates:
+            pattern = re.compile(
+                r"^-\s*<([a-z0-9]+)>\s+role=([a-z0-9_-]+)(?:\s+name='([^']*)')?(?:\s+id=#([^\s]+))?\s*->\s*(.+)$",
+                re.I,
+            )
+            for line in dom_summary.splitlines():
+                m = pattern.match(line.strip())
+                if m:
+                    candidates.append(
+                        {
+                            "tag": m.group(1).lower(),
+                            "role": m.group(2).lower(),
+                            "name": (m.group(3) or "").strip(),
+                            "id": (m.group(4) or "").strip(),
+                            "locator": m.group(5).strip(),
+                        }
+                    )
+        return candidates
+
+    @classmethod
     def _build_fallback_plan(
+        cls,
         target_url: str,
         dom_summary: Optional[str],
         objectives: Optional[list[str]],
     ) -> TestPlanResult:
         dom_lower = (dom_summary or "").lower()
-        scenarios: list[TestScenario] = [
-            TestScenario(
-                scenario_id="SCN-001",
-                title="Landing Route Render & Primary Navigation Smoke",
-                category="smoke",
-                priority="critical",
-                description="Verify initial document load, primary interactive landmarks, and zero blocking navigation errors.",
-                preconditions=["Application URL is reachable", "Clean browser context"],
-                steps=[
-                    TestStepPlan(
-                        step_number=1,
-                        action="navigate",
-                        description=f"Open target application at {target_url}",
-                        target_hint=target_url,
-                        expected_outcome="HTTP 2xx response and main document renders",
-                    ),
-                    TestStepPlan(
-                        step_number=2,
-                        action="assert_visible",
-                        description="Verify primary navigation and main call-to-action controls are visible",
-                        target_hint="button, main, nav",
-                        expected_outcome="Primary landmarks and interactive buttons are visible",
-                    ),
-                ],
-                expected_result="Application loads cleanly with accessible interactive controls.",
+        candidates = cls._extract_dom_candidates(dom_summary)
+        buttons = [c for c in candidates if c["role"] == "button" or c["tag"] == "button"]
+        links = [c for c in candidates if c["role"] == "link" or c["tag"] == "a"]
+        inputs = [c for c in candidates if c["role"] in ("textbox", "combobox") or c["tag"] in ("input", "textarea", "select")]
+
+        scenarios: list[TestScenario] = []
+
+        # Scenario 1: Landing & Primary Element Smoke (using real DOM targets when discovered)
+        scn1_steps: list[TestStepPlan] = [
+            TestStepPlan(
+                step_number=1,
+                action="navigate",
+                description=f"Open target application at {target_url}",
+                target_hint=target_url,
+                expected_outcome="HTTP 2xx response and main document renders",
             ),
-            TestScenario(
-                scenario_id="SCN-002",
-                title="Authentication Modal & Credential Validation Flow",
-                category="auth",
-                priority="high",
-                description="Exercise sign-in trigger, form validation feedback, and authenticated session transition.",
-                preconditions=["User starts unauthenticated"],
-                steps=[
-                    TestStepPlan(
-                        step_number=1,
-                        action="click",
-                        description="Open the Sign In modal or login entry control",
-                        target_hint="button[id*='signin'], getByRole('button', { name: /sign in/i })",
-                        expected_outcome="Authentication form becomes visible",
-                    ),
-                    TestStepPlan(
-                        step_number=2,
-                        action="fill",
-                        description="Populate email field with synthetic QA test email",
-                        target_hint="input[type='email']",
-                        input_value="qa.synthetic@agentswarm.dev",
-                        expected_outcome="Email input reflects entered value",
-                    ),
-                    TestStepPlan(
-                        step_number=3,
-                        action="fill",
-                        description="Populate password field with synthetic QA test password",
-                        target_hint="input[type='password']",
-                        input_value="SyntheticPass!2026",
-                        expected_outcome="Password input masks and stores entry",
-                    ),
-                    TestStepPlan(
-                        step_number=4,
-                        action="click",
-                        description="Submit authentication form",
-                        target_hint="button[type='submit']",
-                        expected_outcome="API responds without unhandled client error",
-                    ),
-                ],
-                expected_result="Authentication request completes cleanly or shows descriptive validation feedback.",
+            TestStepPlan(
+                step_number=2,
+                action="assert_visible",
+                description="Verify primary document landmark and interactive controls are visible",
+                target_hint="main, body, h1",
+                expected_outcome="Primary application shell and heading render visibly",
             ),
         ]
+        if links:
+            first_link = links[0]
+            label = first_link["name"] or "primary link"
+            scn1_steps.append(
+                TestStepPlan(
+                    step_number=3,
+                    action="assert_visible",
+                    description=f"Verify discovered link '{label[:45]}' is visible and clickable",
+                    target_hint=first_link["locator"],
+                    expected_outcome=f"Link '{label[:45]}' is accessible in the viewport",
+                )
+            )
+            scn1_steps.append(
+                TestStepPlan(
+                    step_number=4,
+                    action="click",
+                    description=f"Click discovered link '{label[:45]}'",
+                    target_hint=first_link["locator"],
+                    expected_outcome="Navigation or interaction executes without console or network errors",
+                )
+            )
+        elif buttons:
+            first_btn = buttons[0]
+            label = first_btn["name"] or "primary button"
+            scn1_steps.append(
+                TestStepPlan(
+                    step_number=3,
+                    action="click",
+                    description=f"Click primary discovered button '{label[:45]}'",
+                    target_hint=first_btn["locator"],
+                    expected_outcome="Button responds cleanly without runtime exception",
+                )
+            )
 
-        is_commerce = any(token in dom_lower for token in ("checkout", "cart", "product", "price", "order"))
         scenarios.append(
             TestScenario(
-                scenario_id="SCN-003",
-                title="Multi-Stage Checkout Journey" if is_commerce else "Core Interactive Workflow Verification",
-                category="checkout" if is_commerce else "e2e",
-                priority="high",
-                description=(
-                    "Execute end-to-end cart addition and checkout CTA progression while monitoring selector resilience."
-                    if is_commerce
-                    else "Validate primary user workflow controls, state transitions, and submission feedback."
-                ),
-                preconditions=["Main view loaded"],
-                steps=[
-                    TestStepPlan(
-                        step_number=1,
-                        action="click",
-                        description="Trigger primary workflow action button",
-                        target_hint="button[type='submit'], .cta-primary, getByRole('button', { name: /proceed|deploy|start/i })",
-                        expected_outcome="Workflow transitions to active processing or next step",
-                    ),
-                    TestStepPlan(
-                        step_number=2,
-                        action="assert_visible",
-                        description="Confirm workflow status output updates visibly",
-                        target_hint="main, [role='status']",
-                        expected_outcome="Updated application state renders without selector timeout",
-                    ),
-                ],
-                expected_result="Core interactive workflow advances and updates DOM state reliably.",
+                scenario_id="SCN-001",
+                title="Landing Route Render & Discovered Navigation Smoke",
+                category="smoke",
+                priority="critical",
+                description="Verify initial document load, live DOM interactive elements, and zero blocking errors.",
+                preconditions=["Application URL is reachable", "Clean browser context"],
+                steps=scn1_steps,
+                expected_result="Application loads cleanly with accessible interactive controls.",
             )
         )
 
+        # Scenario 2: Discovered Forms / Inputs OR Authentication Flow
+        if inputs:
+            form_steps: list[TestStepPlan] = [
+                TestStepPlan(
+                    step_number=1,
+                    action="navigate",
+                    description=f"Ensure target page {target_url} is loaded",
+                    target_hint=target_url,
+                    expected_outcome="Page form inputs are ready",
+                )
+            ]
+            step_num = 2
+            for inp in inputs[:3]:
+                inp_label = inp["name"] or inp["id"] or "input field"
+                sample_val = (
+                    "qa.synthetic@agentswarm.dev"
+                    if "email" in inp_label.lower()
+                    else ("SyntheticPass!2026" if "pass" in inp_label.lower() else "AgentSwarm QA Test")
+                )
+                form_steps.append(
+                    TestStepPlan(
+                        step_number=step_num,
+                        action="fill",
+                        description=f"Populate '{inp_label[:40]}' input with synthetic QA value",
+                        target_hint=inp["locator"],
+                        input_value=sample_val,
+                        expected_outcome=f"Input '{inp_label[:40]}' accepts synthetic text cleanly",
+                    )
+                )
+                step_num += 1
+            if buttons:
+                submit_btn = buttons[0]
+                btn_label = submit_btn["name"] or "Submit"
+                form_steps.append(
+                    TestStepPlan(
+                        step_number=step_num,
+                        action="click",
+                        description=f"Click '{btn_label[:40]}' button to submit form",
+                        target_hint=submit_btn["locator"],
+                        expected_outcome="Submission triggers expected state change without 5xx error",
+                    )
+                )
+            scenarios.append(
+                TestScenario(
+                    scenario_id="SCN-002",
+                    title="Discovered Form Inputs & Submission Journey",
+                    category="e2e",
+                    priority="high",
+                    description="Populate real discovered form inputs with synthetic QA data and verify interaction.",
+                    preconditions=["Form elements present in live DOM"],
+                    steps=form_steps,
+                    expected_result="All discovered form controls accept synthetic inputs and submit cleanly.",
+                )
+            )
+        elif len(buttons) >= 2 or "sign in" in dom_lower or "login" in dom_lower:
+            btn_target = buttons[0]["locator"] if buttons else "button"
+            btn_name = (buttons[0]["name"] or "Action") if buttons else "Action"
+            scenarios.append(
+                TestScenario(
+                    scenario_id="SCN-002",
+                    title="Interactive Controls & CTA Verification",
+                    category="auth" if ("sign in" in dom_lower or "login" in dom_lower) else "e2e",
+                    priority="high",
+                    description="Exercise discovered interactive buttons and verify visual state transitions.",
+                    preconditions=["Target page rendered"],
+                    steps=[
+                        TestStepPlan(
+                            step_number=1,
+                            action="navigate",
+                            description=f"Open {target_url}",
+                            target_hint=target_url,
+                            expected_outcome="Page rendered",
+                        ),
+                        TestStepPlan(
+                            step_number=2,
+                            action="assert_visible",
+                            description=f"Verify button '{btn_name[:40]}' is visible",
+                            target_hint=btn_target,
+                            expected_outcome="Interactive button is visible",
+                        ),
+                        TestStepPlan(
+                            step_number=3,
+                            action="click",
+                            description=f"Click '{btn_name[:40]}' control",
+                            target_hint=btn_target,
+                            expected_outcome="UI transitions cleanly without console error",
+                        ),
+                    ],
+                    expected_result="Discovered buttons respond cleanly.",
+                )
+            )
+
+        # Scenario 3: Commerce / Core Interactive Workflow Verification
+        is_commerce = any(token in dom_lower for token in ("checkout", "cart", "product", "price", "order"))
+        if is_commerce or not scenarios or len(scenarios) < 2:
+            cta_hint = (
+                buttons[-1]["locator"]
+                if buttons
+                else "button[type='submit'], .cta-primary, getByRole('button', { name: /proceed|deploy|start/i })"
+            )
+            cta_label = (buttons[-1]["name"] or "primary CTA") if buttons else "primary CTA"
+            scenarios.append(
+                TestScenario(
+                    scenario_id=f"SCN-{len(scenarios) + 1:03d}",
+                    title="Multi-Stage Checkout Journey" if is_commerce else "Core Interactive Workflow Verification",
+                    category="checkout" if is_commerce else "e2e",
+                    priority="high",
+                    description=(
+                        "Execute end-to-end cart addition and checkout CTA progression while monitoring selector resilience."
+                        if is_commerce
+                        else "Validate primary user workflow controls, state transitions, and submission feedback."
+                    ),
+                    preconditions=["Main view loaded"],
+                    steps=[
+                        TestStepPlan(
+                            step_number=1,
+                            action="navigate",
+                            description=f"Ensure application context at {target_url}",
+                            target_hint=target_url,
+                            expected_outcome="Application active",
+                        ),
+                        TestStepPlan(
+                            step_number=2,
+                            action="click",
+                            description=f"Trigger '{cta_label[:40]}' action button",
+                            target_hint=cta_hint,
+                            expected_outcome="Workflow transitions to active processing or next step",
+                        ),
+                        TestStepPlan(
+                            step_number=3,
+                            action="assert_visible",
+                            description="Confirm workflow status output updates visibly",
+                            target_hint="main, body, [role='status']",
+                            expected_outcome="Updated application state renders without selector timeout",
+                        ),
+                    ],
+                    expected_result="Core interactive workflow advances and updates DOM state reliably.",
+                )
+            )
+
         if objectives:
-            for idx, objective in enumerate(objectives[:3], start=4):
+            for objective in objectives[:3]:
+                next_idx = len(scenarios) + 1
+                obj_hint = buttons[0]["locator"] if buttons else (links[0]["locator"] if links else "main, body")
                 scenarios.append(
                     TestScenario(
-                        scenario_id=f"SCN-{idx:03d}",
+                        scenario_id=f"SCN-{next_idx:03d}",
                         title=f"Objective Check: {objective[:72]}",
                         category="objective",
                         priority="high",
@@ -417,7 +711,7 @@ class PlannerAgent:
                                 step_number=2,
                                 action="assert_visible",
                                 description=f"Validate elements related to objective: {objective}",
-                                target_hint="main",
+                                target_hint=obj_hint,
                                 expected_outcome="Objective criteria satisfied without errors",
                             ),
                         ],
@@ -427,7 +721,7 @@ class PlannerAgent:
 
         return TestPlanResult(
             target_url=target_url,
-            summary=f"Generated {len(scenarios)} deterministic QA test scenarios for {target_url}.",
+            summary=f"Generated {len(scenarios)} DOM-aware QA test scenarios for {target_url}.",
             scenarios=scenarios,
             generated_by="deterministic_fallback",
         )
