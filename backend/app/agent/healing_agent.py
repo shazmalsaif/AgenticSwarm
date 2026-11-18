@@ -81,6 +81,10 @@ class SwarmGraphState(TypedDict, total=False):
     objectives: list[str]
     persona_count: int
     page: Optional[Any]
+    use_live_browser: bool
+    record_traces: bool
+    run_id: Optional[str]
+    stream_id: Optional[str]
     test_plan: dict[str, Any]
     personas: dict[str, Any]
     navigation_results: list[dict[str, Any]]
@@ -475,6 +479,7 @@ def build_swarm_graph(
     planner -> persona -> navigator -> triage --(needs_healing)--> healing -> END
                                               --(no healing)-----> END
     """
+    from ..browser.trace_manager import get_stream_manager
     from .navigator_agent import NavigatorAgent
     from .persona_agent import PersonaAgent
     from .planner_agent import PlannerAgent
@@ -486,17 +491,25 @@ def build_swarm_graph(
     triage = TriageAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
     healing = HealingAgent(api_key=api_key, model_name=model_name, provider=provider, llm=llm)
 
+    def _wrap_stage(stage_name: str, stage_idx: int, start_msg: str, fn):
+        def _wrapped(state: SwarmGraphState) -> dict[str, Any]:
+            stream_id = state.get("stream_id")
+            if stream_id:
+                get_stream_manager().update_stage(stream_id, stage_name, start_msg, stage_index=stage_idx)
+            return fn(state)
+        return _wrapped
+
     def _route_after_triage(state: SwarmGraphState) -> str:
         if state.get("healing_candidates"):
             return "healing"
         return END
 
     builder = StateGraph(SwarmGraphState)
-    builder.add_node("planner", planner.run_node)
-    builder.add_node("persona", persona.run_node)
-    builder.add_node("navigator", navigator.run_node)
-    builder.add_node("triage", triage.run_node)
-    builder.add_node("healing", healing.run_node)
+    builder.add_node("planner", _wrap_stage("planner", 0, "Planner Agent generating scenarios from live DOM...", planner.run_node))
+    builder.add_node("persona", _wrap_stage("persona", 1, "Persona Agent synthesizing QA test personas...", persona.run_node))
+    builder.add_node("navigator", _wrap_stage("navigator", 2, "Navigator Agent executing browser steps & streaming frames...", navigator.run_node))
+    builder.add_node("triage", _wrap_stage("triage", 3, "Triage Agent analyzing failures and root causes...", triage.run_node))
+    builder.add_node("healing", _wrap_stage("healing", 4, "Healing Agent synthesizing resilient ARIA locators...", healing.run_node))
 
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "persona")
