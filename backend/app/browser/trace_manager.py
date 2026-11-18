@@ -20,10 +20,13 @@ class TraceEvent(BaseModel):
     action_type: str
     selector: Optional[str] = None
     value: Optional[str] = None
+    description: str = ""
     status: Literal["passed", "failed", "skipped"]
     duration_ms: float = 0.0
     current_url: str = ""
     error_message: Optional[str] = None
+    screenshot_b64: Optional[str] = None
+    target_box: Optional[dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -37,6 +40,7 @@ class TraceArtifact(BaseModel):
     target_url: str
     execution_mode: Literal["playwright", "simulated"] = "simulated"
     trace_zip_path: Optional[str] = None
+    video_url: Optional[str] = None
     events: list[TraceEvent] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
@@ -95,8 +99,11 @@ class TraceManager:
         duration_ms: float = 0.0,
         selector: Optional[str] = None,
         value: Optional[str] = None,
+        description: str = "",
         current_url: str = "",
         error_message: Optional[str] = None,
+        screenshot_b64: Optional[str] = None,
+        target_box: Optional[dict[str, Any]] = None,
     ) -> Optional[TraceEvent]:
         """Append a step event to an existing trace artifact."""
         event = TraceEvent(
@@ -104,10 +111,13 @@ class TraceManager:
             action_type=action_type,
             selector=selector,
             value=value,
+            description=description,
             status=status,
             duration_ms=duration_ms,
             current_url=current_url,
             error_message=error_message,
+            screenshot_b64=screenshot_b64,
+            target_box=target_box,
             timestamp=datetime.now(timezone.utc),
         )
         with self._lock:
@@ -123,6 +133,7 @@ class TraceManager:
         overall_status: Literal["passed", "failed"] = "passed",
         context: Optional[Any] = None,
         save_to_disk: bool = False,
+        video_url: Optional[str] = None,
     ) -> Optional[TraceArtifact]:
         """Finalize an active trace and optionally flush Playwright trace.zip to disk."""
         zip_path: Optional[str] = None
@@ -146,6 +157,8 @@ class TraceManager:
             artifact.overall_status = overall_status
             if zip_path:
                 artifact.trace_zip_path = zip_path
+            if video_url:
+                artifact.video_url = video_url
             return artifact.model_copy(deep=True)
 
     def get_trace(self, trace_id: str) -> Optional[TraceArtifact]:
@@ -180,3 +193,208 @@ _DEFAULT_TRACE_MANAGER = TraceManager()
 def get_trace_manager() -> TraceManager:
     """Return the shared AgentSwarm TraceManager singleton."""
     return _DEFAULT_TRACE_MANAGER
+
+
+class LiveStreamManager:
+    """Thread-safe real-time screenshot frame & agent stage stream broker for SSE and polling."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._streams: dict[str, dict[str, Any]] = {}
+
+    def init_stream(
+        self,
+        stream_id: str,
+        target_url: str = "",
+        provider: Optional[str] = None,
+        model_name: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            existing = self._streams.get(stream_id)
+            state: dict[str, Any] = {
+                "stream_id": stream_id,
+                "run_id": run_id or (existing or {}).get("run_id"),
+                "target_url": target_url or (existing or {}).get("target_url", ""),
+                "provider": provider or (existing or {}).get("provider"),
+                "model_name": model_name or (existing or {}).get("model_name"),
+                "status": "running",
+                "current_stage": "planner",
+                "stage_index": 0,
+                "stage_message": f"Capturing live DOM & planning scenarios for {target_url or 'target URL'}...",
+                "frames": list((existing or {}).get("frames") or []),
+                "events": list((existing or {}).get("events") or []),
+                "video_urls": list((existing or {}).get("video_urls") or []),
+                "started_at": (existing or {}).get("started_at") or now_iso,
+                "updated_at": now_iso,
+            }
+            if not state["events"]:
+                state["events"].append(
+                    {
+                        "type": "stage",
+                        "data": {
+                            "stage": "planner",
+                            "stage_index": 0,
+                            "message": state["stage_message"],
+                            "timestamp": now_iso,
+                        },
+                    }
+                )
+            self._streams[stream_id] = state
+            return dict(state)
+
+    def update_stage(
+        self,
+        stream_id: Optional[str],
+        stage: str,
+        message: str,
+        stage_index: int = 0,
+    ) -> None:
+        if not stream_id:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                state = {
+                    "stream_id": stream_id,
+                    "run_id": None,
+                    "target_url": "",
+                    "provider": None,
+                    "model_name": None,
+                    "status": "running",
+                    "current_stage": stage,
+                    "stage_index": stage_index,
+                    "stage_message": message,
+                    "frames": [],
+                    "events": [],
+                    "video_urls": [],
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+                self._streams[stream_id] = state
+            state["current_stage"] = stage
+            state["stage_index"] = stage_index
+            state["stage_message"] = message
+            state["updated_at"] = now_iso
+            state["events"].append(
+                {
+                    "type": "stage",
+                    "data": {
+                        "stage": stage,
+                        "stage_index": stage_index,
+                        "message": message,
+                        "timestamp": now_iso,
+                    },
+                }
+            )
+
+    def push_frame(self, stream_id: Optional[str], frame: dict[str, Any]) -> None:
+        if not stream_id:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                state = {
+                    "stream_id": stream_id,
+                    "run_id": None,
+                    "target_url": frame.get("current_url", ""),
+                    "provider": None,
+                    "model_name": None,
+                    "status": "running",
+                    "current_stage": "navigator",
+                    "stage_index": 2,
+                    "stage_message": "Executing browser actions...",
+                    "frames": [],
+                    "events": [],
+                    "video_urls": [],
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+                self._streams[stream_id] = state
+            enriched = {
+                **frame,
+                "frame_index": len(state["frames"]),
+                "timestamp": frame.get("timestamp") or now_iso,
+            }
+            state["frames"].append(enriched)
+            state["updated_at"] = now_iso
+            state["events"].append({"type": "frame", "data": enriched})
+
+    def complete_stream(
+        self,
+        stream_id: Optional[str],
+        run_id: Optional[str] = None,
+        status: str = "completed",
+        video_urls: Optional[list[str]] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        if not stream_id:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                return
+            state["status"] = status
+            if run_id:
+                state["run_id"] = run_id
+            if video_urls is not None:
+                state["video_urls"] = list(video_urls)
+            state["current_stage"] = "done"
+            state["stage_index"] = 4
+            if message:
+                state["stage_message"] = message
+            state["updated_at"] = now_iso
+            state["events"].append(
+                {
+                    "type": "complete",
+                    "data": {
+                        "run_id": state["run_id"],
+                        "status": status,
+                        "video_urls": state["video_urls"],
+                        "total_frames": len(state["frames"]),
+                        "timestamp": now_iso,
+                    },
+                }
+            )
+
+    def get_state(self, stream_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                return None
+            return {
+                "stream_id": state["stream_id"],
+                "run_id": state["run_id"],
+                "target_url": state["target_url"],
+                "provider": state["provider"],
+                "model_name": state["model_name"],
+                "status": state["status"],
+                "current_stage": state["current_stage"],
+                "stage_index": state["stage_index"],
+                "stage_message": state["stage_message"],
+                "frames": list(state["frames"]),
+                "events_count": len(state["events"]),
+                "video_urls": list(state["video_urls"]),
+                "started_at": state["started_at"],
+                "updated_at": state["updated_at"],
+            }
+
+    def get_events_since(self, stream_id: str, cursor: int = 0) -> tuple[list[dict[str, Any]], str]:
+        with self._lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                return [], "unknown"
+            events = list(state["events"][cursor:])
+            return events, str(state["status"])
+
+
+_DEFAULT_STREAM_MANAGER = LiveStreamManager()
+
+
+def get_stream_manager() -> LiveStreamManager:
+    """Return the shared AgentSwarm LiveStreamManager singleton."""
+    return _DEFAULT_STREAM_MANAGER
