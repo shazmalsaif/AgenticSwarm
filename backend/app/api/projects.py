@@ -9,7 +9,8 @@ from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..agent.persona_agent import PersonaAgent
-from ..agent.planner_agent import PlannerAgent
+from ..agent.planner_agent import PlannerAgent, list_available_models
+from ..browser.playwright_runner import PlaywrightRunner
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -55,6 +56,9 @@ class ProjectPlanPreviewRequest(BaseModel):
     dom_summary: Optional[str] = Field(None, description="Optional DOM or route snapshot")
     objectives: Optional[list[str]] = Field(None, description="Specific QA focus areas")
     persona_count: int = Field(3, ge=1, le=8, description="Number of synthetic personas to generate")
+    provider: Optional[str] = Field(None, description="Optional LangChain provider override")
+    model_name: Optional[str] = Field(None, description="Optional LangChain model override")
+    use_live_browser: bool = Field(True, description="Fetch live DOM snapshot before planning")
 
 
 class ProjectPlanPreviewResponse(BaseModel):
@@ -62,6 +66,8 @@ class ProjectPlanPreviewResponse(BaseModel):
 
     project_id: str
     target_url: str
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
     test_plan: dict[str, Any]
     personas: dict[str, Any]
     generated_at: datetime
@@ -179,17 +185,37 @@ def generate_project_plan(
     project = _get_or_404(project_id)
     opts = payload or ProjectPlanPreviewRequest()
 
-    planner = PlannerAgent()
+    catalog = list_available_models()
+    resolved_provider = (opts.provider or "").strip()
+    resolved_model = (opts.model_name or "").strip()
+    if resolved_model and not resolved_provider and ":" in resolved_model:
+        prefix, rest = resolved_model.split(":", 1)
+        resolved_provider = prefix.strip()
+        resolved_model = rest.strip()
+    if not resolved_provider:
+        resolved_provider = str(catalog["default_provider"])
+    if not resolved_model:
+        resolved_model = str(catalog["default_model"])
+
+    dom_summary = opts.dom_summary
+    if not dom_summary:
+        captured = PlaywrightRunner().capture_dom_snapshot(
+            target_url=project.target_url,
+            use_live_browser=opts.use_live_browser,
+        )
+        dom_summary = captured.get("dom_summary") or captured.get("dom_snapshot")
+
+    planner = PlannerAgent(provider=resolved_provider, model_name=resolved_model)
     plan = planner.create_test_plan(
         target_url=project.target_url,
-        dom_summary=opts.dom_summary,
+        dom_summary=dom_summary,
         objectives=opts.objectives,
     )
 
-    persona_agent = PersonaAgent()
+    persona_agent = PersonaAgent(provider=resolved_provider, model_name=resolved_model)
     personas = persona_agent.generate_personas(
         target_url=project.target_url,
-        app_context=opts.dom_summary or project.description,
+        app_context=dom_summary or project.description,
         test_plan=plan,
         count=opts.persona_count,
     )
@@ -197,6 +223,8 @@ def generate_project_plan(
     return ProjectPlanPreviewResponse(
         project_id=project.id,
         target_url=project.target_url,
+        provider=resolved_provider,
+        model_name=resolved_model,
         test_plan=plan.model_dump(),
         personas=personas.model_dump(),
         generated_at=datetime.now(timezone.utc),
