@@ -11,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .planner_agent import resolve_chat_model
+from .planner_agent import invoke_with_model_fallback, resolve_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,10 @@ class NavigatorAgent:
         provider: Optional[str] = None,
         llm: Optional[BaseChatModel] = None,
     ) -> None:
+        self._api_key = api_key
+        self._model_name = model_name
+        self._provider = provider
+        self._custom_llm_injected = llm is not None
         self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
             model_name=model_name,
             provider=provider,
@@ -124,11 +128,18 @@ class NavigatorAgent:
         self._chain = (self._prompt | self._llm.with_structured_output(_BrowserActionPlan)) if self._llm else None
         self._graph = self.build_navigator_graph()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
     def _invoke_chain(self, prompt_input: dict[str, Any]) -> list[BrowserAction]:
-        if not self._chain:
-            raise RuntimeError("LangChain structured output chain is not configured.")
-        result = self._chain.invoke(prompt_input)
+        result, _ = invoke_with_model_fallback(
+            self._prompt,
+            _BrowserActionPlan,
+            prompt_input,
+            primary_chain=self._chain,
+            provider=self._provider,
+            model_name=self._model_name,
+            api_key=self._api_key,
+            temperature=0.1,
+            allow_fallback=not self._custom_llm_injected,
+        )
         if not isinstance(result, _BrowserActionPlan):
             result = _BrowserActionPlan.model_validate(result)
         return result.actions
@@ -620,10 +631,22 @@ class NavigatorAgent:
             {"scenario_id": "SCN-001", "title": "Default Smoke Check", "steps": []}
         ]
 
+        from ..browser.trace_manager import get_stream_manager
+
         results: list[dict[str, Any]] = []
         raw_failures: list[dict[str, Any]] = list(state.get("raw_failures") or [])
+        stream_mgr = get_stream_manager() if stream_id else None
 
         for scenario in scenarios:
+            sc_id = str(scenario.get("scenario_id") or "SCN")
+            sc_title = str(scenario.get("title") or "Scenario")
+            if stream_mgr and stream_id:
+                stream_mgr.push_log(
+                    stream_id,
+                    "Navigator Agent",
+                    f"Executing {sc_id}: {sc_title}...",
+                    status="info",
+                )
             run_result = self.execute_scenario(
                 target_url=target_url,
                 scenario=scenario,
@@ -636,6 +659,8 @@ class NavigatorAgent:
             )
             results.append(run_result.model_dump())
             raw_failures.extend(run_result.failures)
+            if stream_mgr and stream_id:
+                stream_mgr.update_partial(stream_id, "navigation_results", list(results))
 
         return {
             "navigation_results": results,

@@ -11,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .planner_agent import resolve_chat_model
+from .planner_agent import invoke_with_model_fallback, resolve_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,10 @@ class HealingAgent:
         provider: Optional[str] = None,
         llm: Optional[BaseChatModel] = None,
     ) -> None:
+        self._api_key = api_key
+        self._model_name = model_name
+        self._provider = provider
+        self._custom_llm_injected = llm is not None
         self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
             model_name=model_name,
             provider=provider,
@@ -195,22 +199,28 @@ class HealingAgent:
             ctx.failure_id = f"HEAL-{index:03d}"
         return ctx
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
     def _invoke_chain(self, ctx: BrokenLocatorContext) -> HealingSuggestion:
-        if not self._chain:
-            raise RuntimeError("LangChain structured output chain is not configured.")
-        result = self._chain.invoke(
-            {
-                "failure_id": ctx.failure_id or "HEAL-001",
-                "target_url": ctx.target_url,
-                "failed_selector": ctx.failed_selector,
-                "action_description": ctx.action_description or "Interact with UI element",
-                "element_role": ctx.element_role or "N/A",
-                "accessible_name": ctx.accessible_name or "N/A",
-                "element_text": ctx.element_text or "N/A",
-                "error_message": ctx.error_message or "N/A",
-                "dom_excerpt": (ctx.dom_excerpt or "N/A")[:2500],
-            }
+        prompt_input = {
+            "failure_id": ctx.failure_id or "HEAL-001",
+            "target_url": ctx.target_url,
+            "failed_selector": ctx.failed_selector,
+            "action_description": ctx.action_description or "Interact with UI element",
+            "element_role": ctx.element_role or "N/A",
+            "accessible_name": ctx.accessible_name or "N/A",
+            "element_text": ctx.element_text or "N/A",
+            "error_message": ctx.error_message or "N/A",
+            "dom_excerpt": (ctx.dom_excerpt or "N/A")[:2500],
+        }
+        result, _ = invoke_with_model_fallback(
+            self._prompt,
+            HealingSuggestion,
+            prompt_input,
+            primary_chain=self._chain,
+            provider=self._provider,
+            model_name=self._model_name,
+            api_key=self._api_key,
+            temperature=0.1,
+            allow_fallback=not self._custom_llm_injected,
         )
         if not isinstance(result, HealingSuggestion):
             result = HealingSuggestion.model_validate(result)
@@ -494,9 +504,69 @@ def build_swarm_graph(
     def _wrap_stage(stage_name: str, stage_idx: int, start_msg: str, fn):
         def _wrapped(state: SwarmGraphState) -> dict[str, Any]:
             stream_id = state.get("stream_id")
-            if stream_id:
-                get_stream_manager().update_stage(stream_id, stage_name, start_msg, stage_index=stage_idx)
-            return fn(state)
+            stream_mgr = get_stream_manager() if stream_id else None
+            if stream_mgr and stream_id:
+                stream_mgr.update_stage(stream_id, stage_name, start_msg, stage_index=stage_idx)
+                stream_mgr.push_log(stream_id, f"{stage_name.title()} Agent", start_msg, status="info")
+
+            out = fn(state)
+
+            if stream_mgr and stream_id and isinstance(out, dict):
+                if stage_name == "planner" and out.get("test_plan"):
+                    tp = out["test_plan"]
+                    scenarios = tp.get("scenarios") or []
+                    gen_by = tp.get("generated_by", "agent")
+                    titles = ", ".join(s.get("title", "Scenario") for s in scenarios[:4])
+                    stream_mgr.update_partial(stream_id, "test_plan", tp)
+                    stream_mgr.push_log(
+                        stream_id,
+                        "Planner Agent",
+                        f"Planned {len(scenarios)} scenario(s) via {gen_by}: {titles}",
+                        status="success",
+                    )
+                elif stage_name == "persona" and out.get("personas"):
+                    pr = out["personas"]
+                    p_list = pr.get("personas") or []
+                    gen_by = pr.get("generated_by", "agent")
+                    names = ", ".join(p.get("name", "Persona") for p in p_list[:4])
+                    stream_mgr.update_partial(stream_id, "personas", pr)
+                    stream_mgr.push_log(
+                        stream_id,
+                        "Persona Agent",
+                        f"Synthesized {len(p_list)} persona(s) via {gen_by}: {names}",
+                        status="success",
+                    )
+                elif stage_name == "navigator" and out.get("navigation_results") is not None:
+                    nav = out["navigation_results"]
+                    stream_mgr.update_partial(stream_id, "navigation_results", nav)
+                    passed = sum(1 for nr in nav if nr.get("overall_status") == "passed")
+                    stream_mgr.push_log(
+                        stream_id,
+                        "Navigator Agent",
+                        f"Completed {len(nav)} scenario(s) ({passed} passed, {len(nav) - passed} failed).",
+                        status="success" if passed == len(nav) else "warning",
+                    )
+                elif stage_name == "triage" and out.get("triage_report"):
+                    tr = out["triage_report"]
+                    stream_mgr.update_partial(stream_id, "triage_report", tr)
+                    diags = tr.get("diagnoses") or []
+                    stream_mgr.push_log(
+                        stream_id,
+                        "Triage Agent",
+                        f"Triaged {len(diags)} failure(s) ({tr.get('healing_candidates', 0)} healing candidate(s)).",
+                        status="info" if diags else "success",
+                    )
+                elif stage_name == "healing" and out.get("healing_report"):
+                    hr = out["healing_report"]
+                    stream_mgr.update_partial(stream_id, "healing_report", hr)
+                    sugs = hr.get("suggestions") or []
+                    stream_mgr.push_log(
+                        stream_id,
+                        "Healing Agent",
+                        f"Synthesized {len(sugs)} self-healing ARIA locator patch(es).",
+                        status="success",
+                    )
+            return out
         return _wrapped
 
     def _route_after_triage(state: SwarmGraphState) -> str:

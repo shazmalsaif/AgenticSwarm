@@ -9,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .planner_agent import resolve_chat_model
+from .planner_agent import invoke_with_model_fallback, resolve_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,10 @@ class PersonaAgent:
         provider: Optional[str] = None,
         llm: Optional[BaseChatModel] = None,
     ) -> None:
+        self._api_key = api_key
+        self._model_name = model_name
+        self._provider = provider
+        self._custom_llm_injected = llm is not None
         self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
             model_name=model_name,
             provider=provider,
@@ -106,14 +110,21 @@ class PersonaAgent:
         ids = [getattr(s, "scenario_id", None) for s in scenarios if getattr(s, "scenario_id", None)]
         return ids or ["SCN-001"]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
     def _invoke_chain(self, prompt_input: dict[str, Any]) -> PersonaSuiteResult:
-        if not self._chain:
-            raise RuntimeError("LangChain structured output chain is not configured.")
-        result = self._chain.invoke(prompt_input)
+        result, resolved_model = invoke_with_model_fallback(
+            self._prompt,
+            PersonaSuiteResult,
+            prompt_input,
+            primary_chain=self._chain,
+            provider=self._provider,
+            model_name=self._model_name,
+            api_key=self._api_key,
+            temperature=0.3,
+            allow_fallback=not self._custom_llm_injected,
+        )
         if not isinstance(result, PersonaSuiteResult):
             result = PersonaSuiteResult.model_validate(result)
-        result.generated_by = "langchain"
+        result.generated_by = f"langchain:{resolved_model}" if resolved_model else "langchain"
         return result
 
     def _node_extract_scenarios(self, state: PersonaGraphState) -> dict[str, Any]:
