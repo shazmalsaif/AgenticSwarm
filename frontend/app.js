@@ -1160,17 +1160,22 @@ const AgentSwarm = {
         setTxt('ws-player-hud-desc', frame.error_message ? `${descTxt} — ${frame.error_message}` : descTxt);
         setTxt('ws-player-hud-duration', `${Number(frame.duration_ms || 0).toFixed(0)} ms`);
 
-        // Animate target highlight box & cursor pointer
+        // Animate target highlight box & cursor pointer (no overlapping box on live playwright frames)
         const tBox = frame.target_box;
+        const isLivePlaywright = frame.execution_mode === 'playwright';
         if (!this.showRawVideo && tBox && typeof tBox.x_pct === 'number') {
           if (boxEl) {
-            boxEl.style.left = `${tBox.x_pct}%`;
-            boxEl.style.top = `${tBox.y_pct}%`;
-            boxEl.style.width = `${tBox.w_pct || 18}%`;
-            boxEl.style.height = `${tBox.h_pct || 8}%`;
-            boxEl.className = frame.status === 'failed'
-              ? 'absolute pointer-events-none rounded-md border-2 border-red-500 bg-red-500/15 shadow-[0_0_0_4px_rgba(220,38,38,0.2)] transition-all duration-300 ease-out z-10'
-              : 'absolute pointer-events-none rounded-md border-2 border-emerald-400 bg-emerald-400/15 shadow-[0_0_0_4px_rgba(22,163,74,0.2)] transition-all duration-300 ease-out z-10';
+            if (isLivePlaywright) {
+              boxEl.classList.add('hidden');
+            } else {
+              boxEl.style.left = `${tBox.x_pct}%`;
+              boxEl.style.top = `${tBox.y_pct}%`;
+              boxEl.style.width = `${tBox.w_pct || 18}%`;
+              boxEl.style.height = `${tBox.h_pct || 8}%`;
+              boxEl.className = frame.status === 'failed'
+                ? 'absolute pointer-events-none rounded-md border-2 border-red-500 bg-red-500/15 shadow-[0_0_0_4px_rgba(220,38,38,0.2)] transition-all duration-300 ease-out z-10'
+                : 'absolute pointer-events-none rounded-md border-2 border-emerald-400 bg-emerald-400/15 shadow-[0_0_0_4px_rgba(22,163,74,0.2)] transition-all duration-300 ease-out z-10';
+            }
           }
           if (cursorEl) {
             const cx = Math.min(94, tBox.x_pct + (tBox.w_pct || 16) * 0.55);
@@ -1388,9 +1393,85 @@ const AgentSwarm = {
       }
     },
 
+    seenLogIndices: new Set(),
+    partialCache: {},
+
+    clearAgentFeed() {
+      this.seenLogIndices = new Set();
+      this.partialCache = {};
+      const listEl = document.getElementById('ws-agent-feed-list');
+      const cntEl = document.getElementById('ws-agent-feed-count');
+      if (listEl) {
+        listEl.innerHTML = '<div class="text-neutral-500 p-2">Connecting to AgentSwarm live stream...</div>';
+      }
+      if (cntEl) cntEl.textContent = '0 events';
+    },
+
+    appendAgentLog(entry) {
+      if (!entry) return;
+      const idx = entry.index;
+      if (idx !== undefined && this.seenLogIndices.has(idx)) return;
+      if (idx !== undefined) this.seenLogIndices.add(idx);
+
+      const listEl = document.getElementById('ws-agent-feed-list');
+      const cntEl = document.getElementById('ws-agent-feed-count');
+      if (!listEl) return;
+
+      if (this.seenLogIndices.size <= 1) {
+        listEl.innerHTML = '';
+      }
+
+      const st = entry.status || 'info';
+      const badgeCls = st === 'success'
+        ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
+        : st === 'error'
+          ? 'bg-red-100 text-red-900 border-red-200'
+          : st === 'warning'
+            ? 'bg-amber-100 text-amber-900 border-amber-200'
+            : 'bg-white text-neutral-800 border-border-hairline';
+
+      const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+      const row = document.createElement('div');
+      row.className = 'p-2.5 rounded-lg bg-white border border-border-hairline space-y-1 shadow-subtle';
+      row.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <span class="px-1.5 py-0.5 rounded border text-[9px] font-bold uppercase ${badgeCls}">${escapeHtml(entry.agent || 'Agent')}</span>
+          <span class="text-[9px] text-neutral-400">${escapeHtml(timeStr)}</span>
+        </div>
+        <p class="text-[11px] text-neutral-800 leading-snug break-words">${escapeHtml(entry.message || '')}</p>
+      `;
+      listEl.appendChild(row);
+      listEl.scrollTop = listEl.scrollHeight;
+      if (cntEl) cntEl.textContent = `${listEl.children.length} events`;
+    },
+
+    handlePartialUpdate(key, val) {
+      if (!key || !val) return;
+      this.partialCache[key] = val;
+      if (key === 'test_plan') {
+        const scenarios = val.scenarios || [];
+        const scEl = document.getElementById('ws-kpi-scenarios');
+        if (scEl) scEl.textContent = String(scenarios.length);
+        this.renderPlanTab(val);
+      } else if (key === 'personas') {
+        const pList = val.personas || [];
+        const pEl = document.getElementById('ws-kpi-personas');
+        if (pEl) pEl.textContent = String(pList.length);
+        this.renderPersonasTab(val);
+      } else if (key === 'navigation_results') {
+        const totalSteps = val.reduce((acc, nr) => acc + (nr.steps?.length || 0), 0);
+        const stEl = document.getElementById('ws-kpi-steps');
+        if (stEl) stEl.textContent = String(totalSteps);
+        this.renderTracesTab(val, []);
+      } else if (key === 'triage_report' || key === 'healing_report') {
+        this.renderHealingTab(this.partialCache.triage_report, this.partialCache.healing_report);
+      }
+    },
+
     connectLiveStream(streamId, targetUrl) {
       this.stopStreamListeners();
       this.player.startLiveStream(targetUrl);
+      this.clearAgentFeed();
 
       if (typeof EventSource !== 'undefined') {
         try {
@@ -1406,10 +1487,26 @@ const AgentSwarm = {
             } catch (_) {}
           });
 
+          es.addEventListener('agent_log', (ev) => {
+            try {
+              const entry = JSON.parse(ev.data);
+              this.appendAgentLog(entry);
+            } catch (_) {}
+          });
+
+          es.addEventListener('partial', (ev) => {
+            try {
+              const payload = JSON.parse(ev.data);
+              this.handlePartialUpdate(payload.key, payload.value);
+            } catch (_) {}
+          });
+
           es.addEventListener('frame', (ev) => {
             try {
               const frame = JSON.parse(ev.data);
               this.player.appendLiveFrame(frame);
+              const stEl = document.getElementById('ws-kpi-steps');
+              if (stEl) stEl.textContent = String(this.player.allFrames.length);
             } catch (_) {}
           });
 
@@ -1431,8 +1528,18 @@ const AgentSwarm = {
           if (typeof st.stage_index === 'number' && st.status === 'running') {
             this.setStageActive(st.stage_index, st.stage_message);
           }
+          if (Array.isArray(st.logs)) {
+            st.logs.forEach((lg) => this.appendAgentLog(lg));
+          }
+          if (st.partial_results && typeof st.partial_results === 'object') {
+            Object.entries(st.partial_results).forEach(([k, v]) => {
+              this.handlePartialUpdate(k, v);
+            });
+          }
           if (Array.isArray(st.frames)) {
             st.frames.forEach((fr) => this.player.appendLiveFrame(fr));
+            const stEl = document.getElementById('ws-kpi-steps');
+            if (stEl && st.frames.length) stEl.textContent = String(st.frames.length);
           }
           if (st.status === 'completed' || st.status === 'failed') {
             this.stopStreamListeners();
@@ -1690,10 +1797,63 @@ const AgentSwarm = {
         this.player.loadFromRun(run);
       }
 
+      if (this.seenLogIndices.size === 0) {
+        this.populateFeedFromRun(run, isPlanPreview);
+      }
+
       this.renderPlanTab(run.test_plan || {});
       this.renderPersonasTab(run.personas || {});
       this.renderTracesTab(navResults, run.trace_artifacts || []);
       this.renderHealingTab(run.triage_report, run.healing_report);
+    },
+
+    populateFeedFromRun(run, isPlanPreview = false) {
+      this.clearAgentFeed();
+      const scenarios = run?.test_plan?.scenarios || [];
+      const personas = run?.personas?.personas || [];
+      const navResults = run?.navigation_results || [];
+      const diagnoses = run?.triage_report?.diagnoses || [];
+      const suggestions = run?.healing_report?.suggestions || [];
+
+      let idx = 0;
+      const push = (agent, message, status = 'info') => {
+        this.appendAgentLog({
+          index: idx++,
+          agent,
+          message,
+          status,
+          timestamp: run?.created_at || new Date().toISOString()
+        });
+      };
+
+      push(
+        'Planner Agent',
+        `Generated ${scenarios.length} scenario(s) via ${run?.test_plan?.generated_by || 'agent'}: ${scenarios.map((s) => s.title).join(', ')}`,
+        'success'
+      );
+      push(
+        'Persona Agent',
+        `Synthesized ${personas.length} persona(s): ${personas.map((p) => p.name).join(', ')}`,
+        'success'
+      );
+      if (!isPlanPreview) {
+        navResults.forEach((nr) => {
+          (nr.steps || []).forEach((st) => {
+            if (st.status === 'skipped') return;
+            push(
+              'Navigator Agent',
+              `${nr.scenario_id} Step ${st.step_number}: ${String(st.action?.action_type || 'step').toUpperCase()} ${st.action?.selector || st.action?.value || ''} -> ${String(st.status).toUpperCase()} (${Number(st.duration_ms || 0).toFixed(0)}ms)`,
+              st.status === 'passed' ? 'success' : 'error'
+            );
+          });
+        });
+        if (diagnoses.length) {
+          push('Triage Agent', `Classified ${diagnoses.length} failure(s).`, 'warning');
+        }
+        if (suggestions.length) {
+          push('Healing Agent', `Synthesized ${suggestions.length} resilient ARIA patch(es).`, 'success');
+        }
+      }
     },
 
     renderPlanTab(testPlan) {
@@ -1705,8 +1865,14 @@ const AgentSwarm = {
         return;
       }
 
-      const summaryHtml = testPlan.summary
-        ? `<div class="p-3.5 rounded-lg bg-[#f4f3f1] border border-border-hairline text-xs font-mono text-neutral-800">${escapeHtml(testPlan.summary)}</div>`
+      const genBy = String(testPlan.generated_by || '');
+      const isAi = genBy.startsWith('langchain');
+      const engineBadge = genBy
+        ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${isAi ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}">${escapeHtml(isAi ? `Live AI (${genBy})` : `Fallback (${genBy})`)}</span>`
+        : '';
+
+      const summaryHtml = (testPlan.summary || engineBadge)
+        ? `<div class="p-3.5 rounded-lg bg-[#f4f3f1] border border-border-hairline text-xs font-mono text-neutral-800 flex flex-wrap items-center justify-between gap-2"><span>${escapeHtml(testPlan.summary || '')}</span>${engineBadge}</div>`
         : '';
 
       const cardsHtml = scenarios.map((sc) => {
@@ -2043,6 +2209,7 @@ const AgentSwarm = {
         if (!res.ok) return;
         const data = await res.json();
         this.state.currentRun = data;
+        this.seenLogIndices = new Set();
         const input = document.getElementById('ws-target-url');
         if (input && data.target_url) input.value = data.target_url;
         this.renderRunResult(data);
