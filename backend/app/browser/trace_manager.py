@@ -222,8 +222,10 @@ class LiveStreamManager:
                 "status": "running",
                 "current_stage": "planner",
                 "stage_index": 0,
-                "stage_message": f"Capturing live DOM & planning scenarios for {target_url or 'target URL'}...",
+                "stage_message": f"Opening {target_url or 'target URL'} in live browser & inspecting DOM...",
                 "frames": list((existing or {}).get("frames") or []),
+                "logs": list((existing or {}).get("logs") or []),
+                "partial_results": dict((existing or {}).get("partial_results") or {}),
                 "events": list((existing or {}).get("events") or []),
                 "video_urls": list((existing or {}).get("video_urls") or []),
                 "started_at": (existing or {}).get("started_at") or now_iso,
@@ -244,6 +246,30 @@ class LiveStreamManager:
             self._streams[stream_id] = state
             return dict(state)
 
+    def _ensure_stream_locked(self, stream_id: str, now_iso: str) -> dict[str, Any]:
+        state = self._streams.get(stream_id)
+        if state is None:
+            state = {
+                "stream_id": stream_id,
+                "run_id": None,
+                "target_url": "",
+                "provider": None,
+                "model_name": None,
+                "status": "running",
+                "current_stage": "planner",
+                "stage_index": 0,
+                "stage_message": "Running AgentSwarm...",
+                "frames": [],
+                "logs": [],
+                "partial_results": {},
+                "events": [],
+                "video_urls": [],
+                "started_at": now_iso,
+                "updated_at": now_iso,
+            }
+            self._streams[stream_id] = state
+        return state
+
     def update_stage(
         self,
         stream_id: Optional[str],
@@ -255,25 +281,7 @@ class LiveStreamManager:
             return
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
-            state = self._streams.get(stream_id)
-            if state is None:
-                state = {
-                    "stream_id": stream_id,
-                    "run_id": None,
-                    "target_url": "",
-                    "provider": None,
-                    "model_name": None,
-                    "status": "running",
-                    "current_stage": stage,
-                    "stage_index": stage_index,
-                    "stage_message": message,
-                    "frames": [],
-                    "events": [],
-                    "video_urls": [],
-                    "started_at": now_iso,
-                    "updated_at": now_iso,
-                }
-                self._streams[stream_id] = state
+            state = self._ensure_stream_locked(stream_id, now_iso)
             state["current_stage"] = stage
             state["stage_index"] = stage_index
             state["stage_message"] = message
@@ -290,30 +298,61 @@ class LiveStreamManager:
                 }
             )
 
+    def push_log(
+        self,
+        stream_id: Optional[str],
+        agent: str,
+        message: str,
+        status: str = "info",
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if not stream_id:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._ensure_stream_locked(stream_id, now_iso)
+            entry = {
+                "index": len(state["logs"]),
+                "agent": agent,
+                "message": message,
+                "status": status,
+                "details": details or {},
+                "timestamp": now_iso,
+            }
+            state["logs"].append(entry)
+            state["updated_at"] = now_iso
+            state["events"].append({"type": "agent_log", "data": entry})
+
+    def update_partial(
+        self,
+        stream_id: Optional[str],
+        key: str,
+        value: Any,
+    ) -> None:
+        if not stream_id:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._ensure_stream_locked(stream_id, now_iso)
+            state["partial_results"][key] = value
+            state["updated_at"] = now_iso
+            state["events"].append(
+                {
+                    "type": "partial",
+                    "data": {
+                        "key": key,
+                        "value": value,
+                        "timestamp": now_iso,
+                    },
+                }
+            )
+
     def push_frame(self, stream_id: Optional[str], frame: dict[str, Any]) -> None:
         if not stream_id:
             return
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
-            state = self._streams.get(stream_id)
-            if state is None:
-                state = {
-                    "stream_id": stream_id,
-                    "run_id": None,
-                    "target_url": frame.get("current_url", ""),
-                    "provider": None,
-                    "model_name": None,
-                    "status": "running",
-                    "current_stage": "navigator",
-                    "stage_index": 2,
-                    "stage_message": "Executing browser actions...",
-                    "frames": [],
-                    "events": [],
-                    "video_urls": [],
-                    "started_at": now_iso,
-                    "updated_at": now_iso,
-                }
-                self._streams[stream_id] = state
+            state = self._ensure_stream_locked(stream_id, now_iso)
             enriched = {
                 **frame,
                 "frame_index": len(state["frames"]),
@@ -377,6 +416,8 @@ class LiveStreamManager:
                 "stage_index": state["stage_index"],
                 "stage_message": state["stage_message"],
                 "frames": list(state["frames"]),
+                "logs": list(state.get("logs") or []),
+                "partial_results": dict(state.get("partial_results") or {}),
                 "events_count": len(state["events"]),
                 "video_urls": list(state["video_urls"]),
                 "started_at": state["started_at"],
