@@ -47,8 +47,8 @@ _DEMO_STAGING_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-def _has_playwright_chromium() -> bool:
-    """Return True if a local Playwright Chromium binary exists on disk."""
+def _resolve_browser_executable() -> Optional[str]:
+    """Locate a local Chromium, Google Chrome, or Microsoft Edge executable for Playwright."""
     candidates: list[Path] = []
     env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
     if env_path and env_path != "0":
@@ -63,11 +63,47 @@ def _has_playwright_chromium() -> bool:
         if not base.exists():
             continue
         for sub in base.glob("chromium*"):
-            if (sub / "chrome-win" / "chrome.exe").exists() or (sub / "chrome-win64" / "chrome.exe").exists():
-                return True
-            if (sub / "chrome-linux" / "chrome").exists() or (sub / "chrome-mac" / "Chromium.app").exists():
-                return True
-    return False
+            for rel in (
+                sub / "chrome-win" / "chrome.exe",
+                sub / "chrome-win64" / "chrome.exe",
+                sub / "chrome-linux" / "chrome",
+                sub / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
+            ):
+                if rel.exists():
+                    return str(rel)
+
+    system_browsers = [
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+        Path(local_app) / "Google" / "Chrome" / "Application" / "chrome.exe" if local_app else Path(""),
+        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ]
+    for path in system_browsers:
+        if str(path) and path.exists() and path.is_file():
+            return str(path)
+    return None
+
+
+def _has_playwright_chromium() -> bool:
+    """Return True if Playwright Chromium, Chrome, or Edge is available on disk."""
+    return _resolve_browser_executable() is not None
+
+
+def _launch_chromium(playwright_instance: Any, headless: bool = True) -> Any:
+    """Launch Playwright Chromium using local cache or installed Chrome/Edge binary."""
+    exe_path = _resolve_browser_executable()
+    launch_kwargs: dict[str, Any] = {
+        "headless": headless,
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    if exe_path:
+        launch_kwargs["executable_path"] = exe_path
+    return playwright_instance.chromium.launch(**launch_kwargs)
 
 
 class PlaywrightRunConfig(BaseModel):
@@ -103,14 +139,15 @@ class PlaywrightRunner:
         use_live_browser: bool = False,
         fallback_html: Optional[str] = None,
         headless: bool = True,
-        timeout_ms: int = 10000,
+        timeout_ms: int = 15000,
+        stream_id: Optional[str] = None,
     ) -> dict[str, Optional[str]]:
         """
-        Capture HTML DOM snapshot and interactive summary for planning and locator healing.
+        Capture HTML DOM snapshot, interactive summary, and an initial live browser screenshot.
 
-        Never hangs if Chromium is unavailable; uses Playwright (when installed, with strict timeout)
-        or httpx live fetch, and provides a realistic snapshot for the staging.store.nexus demo host.
+        Launches installed Chrome/Edge via Playwright when `use_live_browser=True`; falls back to httpx.
         """
+        stream_mgr = get_stream_manager()
         if not use_live_browser:
             html = fallback_html or (_DEMO_STAGING_HTML if "staging.store.nexus" in target_url else None)
             summary = BrowserToolkit.summarize_dom_for_agents(html) if html else None
@@ -118,31 +155,99 @@ class PlaywrightRunner:
 
         if "staging.store.nexus" in target_url and not fallback_html:
             summary = BrowserToolkit.summarize_dom_for_agents(_DEMO_STAGING_HTML)
+            if stream_id:
+                stream_mgr.push_log(
+                    stream_id,
+                    "DOM Inspector",
+                    "Loaded Nexus Store Staging demo DOM snapshot.",
+                    status="info",
+                )
             return {"dom_snapshot": _DEMO_STAGING_HTML, "dom_summary": summary}
 
         if _has_playwright_chromium():
-            def _pw_fetch() -> Optional[str]:
+            if stream_id:
+                stream_mgr.push_log(
+                    stream_id,
+                    "DOM Inspector",
+                    f"Launching headless browser to open {target_url}...",
+                    status="info",
+                )
+
+            def _pw_fetch() -> tuple[Optional[str], Optional[str]]:
                 from playwright.sync_api import sync_playwright
 
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=headless)
+                    browser = _launch_chromium(p, headless=headless)
                     try:
-                        context = browser.new_context()
+                        context = browser.new_context(
+                            viewport={"width": 1280, "height": 720},
+                            user_agent=(
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                            ),
+                        )
                         page = context.new_page()
-                        page.goto(target_url, timeout=min(timeout_ms, 6000))
-                        return page.content()
+                        page.goto(target_url, wait_until="domcontentloaded", timeout=min(timeout_ms, 12000))
+                        try:
+                            page.wait_for_timeout(1200)
+                        except Exception:
+                            pass
+                        html_text = page.content()
+                        shot_b64: Optional[str] = None
+                        try:
+                            raw = page.screenshot(type="jpeg", quality=80)
+                            if isinstance(raw, (bytes, bytearray)) and len(raw) > 0:
+                                shot_b64 = "data:image/jpeg;base64," + base64.b64encode(bytes(raw)).decode("ascii")
+                        except Exception:
+                            pass
+                        return html_text, shot_b64
                     finally:
                         browser.close()
 
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     fut = pool.submit(_pw_fetch)
-                    html = fut.result(timeout=6.5)
+                    html, initial_shot = fut.result(timeout=20.0)
                     if html:
                         summary = BrowserToolkit.summarize_dom_for_agents(html)
+                        elements = BrowserToolkit.extract_interactive_elements(html)
+                        if stream_id:
+                            if initial_shot:
+                                stream_mgr.push_frame(
+                                    stream_id,
+                                    {
+                                        "scenario_id": "LIVE-DOM",
+                                        "scenario_title": "Initial Live Browser Load",
+                                        "step_number": 1,
+                                        "total_steps": 1,
+                                        "action_type": "goto",
+                                        "selector": None,
+                                        "value": target_url,
+                                        "description": f"Loaded live website {target_url}",
+                                        "status": "passed",
+                                        "duration_ms": 1200.0,
+                                        "current_url": target_url,
+                                        "screenshot_b64": initial_shot,
+                                        "target_box": None,
+                                        "execution_mode": "playwright",
+                                    },
+                                )
+                            stream_mgr.push_log(
+                                stream_id,
+                                "DOM Inspector",
+                                f"Captured live rendered DOM from {target_url} ({len(elements)} interactive elements found).",
+                                status="success",
+                            )
                         return {"dom_snapshot": html, "dom_summary": summary}
             except Exception as exc:
                 logger.warning("[PlaywrightRunner] Playwright snapshot timed out/failed for %s: %s", target_url, exc)
+                if stream_id:
+                    stream_mgr.push_log(
+                        stream_id,
+                        "DOM Inspector",
+                        f"Headless browser snapshot fallback to HTTP fetch ({exc})",
+                        status="warning",
+                    )
 
         # Fast httpx live HTML fetch fallback
         try:
@@ -157,6 +262,14 @@ class PlaywrightRunner:
             if resp.text and "<" in resp.text:
                 html = resp.text
                 summary = BrowserToolkit.summarize_dom_for_agents(html)
+                if stream_id:
+                    elements = BrowserToolkit.extract_interactive_elements(html)
+                    stream_mgr.push_log(
+                        stream_id,
+                        "DOM Inspector",
+                        f"Fetched HTML via HTTP ({len(elements)} interactive elements extracted).",
+                        status="info",
+                    )
                 return {"dom_snapshot": html, "dom_summary": summary}
         except Exception as exc:
             logger.warning("[PlaywrightRunner] httpx snapshot capture failed for %s: %s", target_url, exc)
@@ -284,40 +397,17 @@ class PlaywrightRunner:
         cx = bx + bw * 0.55
         cy = by + bh * 0.55
         svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
-  <rect width="1280" height="720" fill="#f5f5f4"/>
-  <!-- Browser Chrome -->
-  <rect x="0" y="0" width="1280" height="78" fill="#e7e5e4"/>
-  <circle cx="34" cy="39" r="7" fill="#ef4444"/>
-  <circle cx="58" cy="39" r="7" fill="#f59e0b"/>
-  <circle cx="82" cy="39" r="7" fill="#22c55e"/>
-  <rect x="120" y="18" width="840" height="42" rx="8" fill="#ffffff" stroke="#d6d3d1"/>
-  <text x="142" y="44" font-family="monospace" font-size="15" fill="#1c1917">{safe_url}</text>
-  <rect x="980" y="18" width="270" height="42" rx="8" fill="{accent_bg}" stroke="{accent}"/>
-  <text x="1000" y="44" font-family="monospace" font-size="14" font-weight="700" fill="{accent}">STEP {step_number}/{max(total_steps, 1)} • {status.upper()}</text>
-
-  <!-- Page Canvas -->
-  <rect x="52" y="106" width="1176" height="504" rx="14" fill="#fafaf9" stroke="#e7e5e4" stroke-width="2"/>
-  <text x="90" y="160" font-family="sans-serif" font-size="24" font-weight="700" fill="#09090b">{safe_title}</text>
-  <text x="90" y="196" font-family="monospace" font-size="14" fill="#52525b">{safe_desc}</text>
-  <line x1="90" y1="218" x2="1190" y2="218" stroke="#e4e4e7" stroke-width="1.5"/>
+  <rect width="1280" height="720" fill="#fafaf9"/>
+  <!-- Simulated Canvas Header -->
+  <rect x="44" y="28" width="1192" height="664" rx="14" fill="#ffffff" stroke="#e4e4e7" stroke-width="2"/>
+  <text x="86" y="88" font-family="sans-serif" font-size="24" font-weight="700" fill="#09090b">{safe_title}</text>
+  <text x="86" y="120" font-family="monospace" font-size="14" fill="#52525b">{safe_url} — {safe_desc}</text>
+  <rect x="970" y="54" width="230" height="36" rx="8" fill="{accent_bg}" stroke="{accent}"/>
+  <text x="990" y="77" font-family="monospace" font-size="13" font-weight="700" fill="{accent}">SIMULATED STEP {step_number}/{max(total_steps, 1)} • {status.upper()}</text>
+  <line x1="86" y1="146" x2="1194" y2="146" stroke="#e4e4e7" stroke-width="1.5"/>
 
   {''.join(el_svgs)}
   {err_banner}
-
-  <!-- Active Agent Target Highlight Box -->
-  <rect x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="8" fill="{accent}" fill-opacity="0.14" stroke="{accent}" stroke-width="3" stroke-dasharray="8 4"/>
-  <rect x="{bx:.1f}" y="{max(by - 32, 86):.1f}" width="280" height="26" rx="6" fill="#09090b"/>
-  <text x="{bx + 10:.1f}" y="{max(by - 14, 104):.1f}" font-family="monospace" font-size="12" font-weight="700" fill="#ffffff">{safe_action}: {safe_target[:28]}</text>
-
-  <!-- Agent Cursor Ripple & Pointer -->
-  <circle cx="{cx:.1f}" cy="{cy:.1f}" r="22" fill="{accent}" fill-opacity="0.22" stroke="{accent}" stroke-width="2"/>
-  <polygon points="{cx:.1f},{cy:.1f} {cx:.1f},{cy + 24:.1f} {cx + 7:.1f},{cy + 18:.1f} {cx + 15:.1f},{cy + 28:.1f} {cx + 19:.1f},{cy + 25:.1f} {cx + 11:.1f},{cy + 16:.1f} {cx + 20:.1f},{cy + 16:.1f}" fill="#000000" stroke="#ffffff" stroke-width="1.5"/>
-
-  <!-- Bottom Action Bar -->
-  <rect x="0" y="636" width="1280" height="84" fill="#18181b"/>
-  <rect x="34" y="658" width="126" height="36" rx="6" fill="{accent}"/>
-  <text x="52" y="681" font-family="monospace" font-size="14" font-weight="700" fill="#ffffff">{safe_action}</text>
-  <text x="182" y="682" font-family="monospace" font-size="15" fill="#f4f4f5">Target: {safe_target}</text>
 </svg>'''
         encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
         return f"data:image/svg+xml;base64,{encoded}"
@@ -336,9 +426,10 @@ class PlaywrightRunner:
         status: str,
         dom_snapshot: Optional[str] = None,
         error_message: Optional[str] = None,
-    ) -> tuple[Optional[str], dict[str, Any]]:
-        """Extract bounding box, inject temporary visual highlight on live Playwright page, and capture JPEG frame."""
-        target_box = cls._compute_target_box(action, step_number, total_steps, dom_snapshot)
+        fallback_box: Optional[dict[str, Any]] = None,
+    ) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        """Extract bounding box, inject a clean highlight border on live Playwright page, and capture JPEG frame."""
+        target_box: Optional[dict[str, Any]] = fallback_box
         sel = used_selector or action.selector
         overlay_id = "agentswarm-live-highlight"
 
@@ -357,21 +448,17 @@ class PlaywrightRunner:
                             "label": sel[:48],
                         }
                         if hasattr(page, "evaluate"):
-                            color = "#16a34a" if status == "passed" else "#dc2626"
+                            color = "#22c55e" if status == "passed" else "#ef4444"
                             page.evaluate(
-                                """([box, label, color, id]) => {
+                                """([box, color, id]) => {
                                     const old = document.getElementById(id);
                                     if (old) old.remove();
                                     const el = document.createElement('div');
                                     el.id = id;
-                                    el.style.cssText = `position:fixed;left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;border:3px solid ${color};background:rgba(22,163,74,0.12);border-radius:6px;z-index:2147483647;pointer-events:none;box-shadow:0 0 0 4px rgba(0,0,0,0.15);`;
-                                    const tag = document.createElement('div');
-                                    tag.textContent = label;
-                                    tag.style.cssText = 'position:absolute;top:-26px;left:0;background:#000;color:#fff;font:600 11px monospace;padding:3px 8px;border-radius:4px;white-space:nowrap;';
-                                    el.appendChild(tag);
+                                    el.style.cssText = `position:fixed;left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;border:3px solid ${color};background:rgba(34,197,94,0.14);border-radius:6px;z-index:2147483647;pointer-events:none;box-shadow:0 0 18px rgba(34,197,94,0.45);`;
                                     document.body.appendChild(el);
                                 }""",
-                                [raw_box, f"{action.action_type.upper()}: {sel[:30]}", color, overlay_id],
+                                [raw_box, color, overlay_id],
                             )
             except Exception:
                 pass
@@ -379,7 +466,7 @@ class PlaywrightRunner:
         screenshot_b64: Optional[str] = None
         if page is not None and hasattr(page, "screenshot"):
             try:
-                raw = page.screenshot(type="jpeg", quality=70)
+                raw = page.screenshot(type="jpeg", quality=80)
                 if isinstance(raw, (bytes, bytearray)) and len(raw) > 0:
                     screenshot_b64 = "data:image/jpeg;base64," + base64.b64encode(bytes(raw)).decode("ascii")
             except Exception as exc:
@@ -392,6 +479,8 @@ class PlaywrightRunner:
                 pass
 
         if not screenshot_b64:
+            if target_box is None:
+                target_box = cls._compute_target_box(action, step_number, total_steps, dom_snapshot)
             screenshot_b64 = cls._build_synthetic_frame_b64(
                 target_url=str(getattr(page, "url", "") or target_url),
                 scenario_title=scenario_title,
@@ -440,7 +529,7 @@ class PlaywrightRunner:
                 cfg=cfg,
             )
 
-        if cfg.use_live_browser and _has_playwright_chromium():
+        if cfg.use_live_browser and _has_playwright_chromium() and "staging.store.nexus" not in target_url:
             try:
                 from playwright.sync_api import sync_playwright
 
@@ -449,10 +538,14 @@ class PlaywrightRunner:
                     if cfg.record_video:
                         videos_dir.mkdir(parents=True, exist_ok=True)
                     with sync_playwright() as p:
-                        browser = p.chromium.launch(headless=cfg.headless)
+                        browser = _launch_chromium(p, headless=cfg.headless)
                         try:
                             ctx_kwargs: dict[str, Any] = {
-                                "viewport": {"width": cfg.viewport_width, "height": cfg.viewport_height}
+                                "viewport": {"width": cfg.viewport_width, "height": cfg.viewport_height},
+                                "user_agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                                ),
                             }
                             if cfg.record_video:
                                 ctx_kwargs["record_video_dir"] = str(videos_dir)
@@ -499,7 +592,7 @@ class PlaywrightRunner:
                             browser.close()
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    return pool.submit(_run_pw).result(timeout=25.0)
+                    return pool.submit(_run_pw).result(timeout=60.0)
             except Exception as exc:
                 logger.warning(
                     "[PlaywrightRunner] Live browser launch unavailable (%s); falling back to simulated runner.",
@@ -551,7 +644,8 @@ class PlaywrightRunner:
                 target_box=target_box,
             )
         if stream_id and status != "skipped":
-            get_stream_manager().push_frame(
+            stream_mgr = get_stream_manager()
+            stream_mgr.push_frame(
                 stream_id,
                 {
                     "scenario_id": scenario_id,
@@ -571,6 +665,12 @@ class PlaywrightRunner:
                     "execution_mode": execution_mode,
                 },
             )
+            target_desc = selector or action.value or action.description or action.action_type
+            log_status = "success" if status == "passed" else "error"
+            msg = f"{scenario_id} Step {action.step_number}/{total_steps}: {action.action_type.upper()} {target_desc} -> {status.upper()} ({duration_ms:.0f}ms)"
+            if error_message:
+                msg += f" | {error_message[:100]}"
+            stream_mgr.push_log(stream_id, "Navigator Agent", msg, status=log_status)
 
     def _execute_on_page(
         self,
@@ -637,12 +737,42 @@ class PlaywrightRunner:
                 continue
 
             started = time.perf_counter()
+            pre_box: Optional[dict[str, Any]] = None
+            if action.selector and action.action_type not in ("goto", "assert_url"):
+                try:
+                    pre_loc = BrowserToolkit._to_playwright_locator(page, action.selector)
+                    first_pre = pre_loc.first if hasattr(pre_loc, "first") else pre_loc
+                    if hasattr(first_pre, "scroll_into_view_if_needed"):
+                        first_pre.scroll_into_view_if_needed(timeout=800)
+                    if hasattr(first_pre, "bounding_box"):
+                        raw_pre = first_pre.bounding_box(timeout=800)
+                        if isinstance(raw_pre, dict) and raw_pre.get("width", 0) > 0:
+                            pre_box = {
+                                "x_pct": round(max(0.0, min(95.0, (raw_pre["x"] / 1280.0) * 100.0)), 1),
+                                "y_pct": round(max(0.0, min(95.0, (raw_pre["y"] / 720.0) * 100.0)), 1),
+                                "w_pct": round(max(2.0, min(90.0, (raw_pre["width"] / 1280.0) * 100.0)), 1),
+                                "h_pct": round(max(2.0, min(90.0, (raw_pre["height"] / 720.0) * 100.0)), 1),
+                                "label": action.selector[:48],
+                            }
+                except Exception:
+                    pass
+
+            exec_action = (
+                action.model_copy(update={"timeout_ms": max(action.timeout_ms, 12000)})
+                if action.action_type == "goto"
+                else action
+            )
             try:
                 action_status, used_selector = BrowserToolkit.execute_playwright_action(
                     page=page,
-                    action=action,
+                    action=exec_action,
                     target_url=target_url,
                 )
+                if action.action_type in ("goto", "click", "fill") and hasattr(page, "wait_for_timeout"):
+                    try:
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
                 if action_status is not None and (
                     collector.last_http_status is None or action_status >= 400
                 ):
@@ -665,6 +795,7 @@ class PlaywrightRunner:
                     target_url=current_url,
                     status="passed",
                     dom_snapshot=dom_snapshot,
+                    fallback_box=pre_box,
                 )
                 step_results.append(
                     NavigationStepResult(
