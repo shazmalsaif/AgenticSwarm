@@ -143,6 +143,7 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
         captured = PlaywrightRunner().capture_dom_snapshot(
             target_url=resolved_url,
             use_live_browser=payload.use_live_browser,
+            stream_id=payload.stream_id,
         )
         dom_snapshot = captured.get("dom_snapshot")
         dom_summary = captured.get("dom_summary") or dom_snapshot
@@ -231,13 +232,18 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
     if dom_snapshot and not config_snapshot.get("dom_snapshot"):
         config_snapshot["dom_snapshot"] = dom_snapshot[:12000]
 
+    plan_gen_by = str(test_plan.get("generated_by") or "")
+    actual_model = resolved_model
+    if plan_gen_by.startswith("langchain:") and ":" in plan_gen_by:
+        actual_model = plan_gen_by.split(":", 1)[1].strip() or resolved_model
+
     run_record = TestRunResponse(
         id=run_id,
         project_id=payload.project_id,
         target_url=resolved_url,
         status=run_status,
         provider=resolved_provider,
-        model_name=resolved_model,
+        model_name=actual_model,
         scenarios_count=len(test_plan.get("scenarios") or []),
         personas_count=len(personas.get("personas") or []),
         failures_count=failures_count,
@@ -276,6 +282,8 @@ def get_live_stream_state(stream_id: str) -> dict[str, Any]:
             "stage_index": 0,
             "stage_message": "Initializing AgentSwarm stream...",
             "frames": [],
+            "logs": [],
+            "partial_results": {},
             "video_urls": [],
         }
     return state
