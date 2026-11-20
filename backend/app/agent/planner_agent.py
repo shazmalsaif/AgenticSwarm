@@ -74,16 +74,16 @@ def parse_provider_and_model(
 
 AVAILABLE_MODELS: list[dict[str, str]] = [
     {
+        "id": "openrouter:openrouter/free",
+        "provider": "openrouter",
+        "model_name": "openrouter/free",
+        "label": "OpenRouter Free • Auto Free Router (Recommended)",
+    },
+    {
         "id": "openrouter:baidu/ernie-5.5-flash-preview:free",
         "provider": "openrouter",
         "model_name": "baidu/ernie-5.5-flash-preview:free",
         "label": "OpenRouter Free • Baidu ERNIE 5.5 Flash Preview",
-    },
-    {
-        "id": "openrouter:openrouter/free",
-        "provider": "openrouter",
-        "model_name": "openrouter/free",
-        "label": "OpenRouter Free • Auto Free Router (openrouter/free)",
     },
     {
         "id": "openrouter:google/gemma-3-27b-it:free",
@@ -174,6 +174,9 @@ AVAILABLE_MODELS: list[dict[str, str]] = [
 ]
 
 _DISCOVERED_GOOGLE_MODELS_CACHE: Optional[list[str]] = None
+_UNAVAILABLE_MODELS: set[str] = set()
+_WORKING_GOOGLE_MODEL: Optional[str] = None
+_WORKING_OPENROUTER_MODEL: Optional[str] = None
 
 
 def _discover_google_models(api_key: Optional[str] = None) -> list[str]:
@@ -243,9 +246,8 @@ def list_available_models() -> dict[str, Any]:
     if env_model:
         default_model = env_model
     elif default_provider == "openrouter":
-        default_model = (os.getenv("OPENROUTER_MODEL") or "baidu/ernie-5.5-flash-preview:free").strip()
+        default_model = (os.getenv("OPENROUTER_MODEL") or "openrouter/free").strip()
     elif default_provider == "google_genai":
-        default_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
         explicit_gemini = (os.getenv("GEMINI_MODEL") or "").strip()
         if explicit_gemini:
             default_model = explicit_gemini
@@ -484,13 +486,14 @@ def resolve_chat_model(
             resolved_key = (explicit_key or os.getenv("OPENROUTER_API_KEY") or "").strip()
             if not resolved_key:
                 return None
-            resolved_model = (parsed_model or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
             resolved_model = (
                 parsed_model
                 or os.getenv("LLM_MODEL")
                 or os.getenv("OPENROUTER_MODEL")
-                or "baidu/ernie-5.5-flash-preview:free"
+                or "openrouter/free"
             ).strip()
+            if resolved_model in _UNAVAILABLE_MODELS and _WORKING_OPENROUTER_MODEL:
+                resolved_model = _WORKING_OPENROUTER_MODEL
             return _OpenRouterChatModel(
                 model_name=resolved_model,
                 api_key=resolved_key,
@@ -560,7 +563,7 @@ def invoke_with_model_fallback(
 
     Returns `(validated_result, resolved_model_name)`.
     """
-    global _WORKING_GOOGLE_MODEL
+    global _WORKING_GOOGLE_MODEL, _WORKING_OPENROUTER_MODEL
     if primary_chain is None:
         raise RuntimeError("LangChain structured output chain is not configured.")
 
@@ -578,13 +581,23 @@ def invoke_with_model_fallback(
     failed_model = (
         eff_model
         or (
-            "baidu/ernie-5.5-flash-preview:free"
+            _WORKING_OPENROUTER_MODEL or "openrouter/free"
             if eff_provider == "openrouter"
             else (_WORKING_GOOGLE_MODEL or "gemini-3.8-flash")
         )
     ).strip()
 
-    if eff_provider == "google_genai" and failed_model in _UNAVAILABLE_MODELS and _WORKING_GOOGLE_MODEL and _WORKING_GOOGLE_MODEL not in _UNAVAILABLE_MODELS:
+    if eff_provider == "openrouter" and failed_model in _UNAVAILABLE_MODELS and _WORKING_OPENROUTER_MODEL and _WORKING_OPENROUTER_MODEL not in _UNAVAILABLE_MODELS:
+        alt_llm = resolve_chat_model(
+            model_name=_WORKING_OPENROUTER_MODEL,
+            provider="openrouter",
+            api_key=api_key,
+            temperature=temperature,
+        )
+        if alt_llm:
+            primary_chain = prompt | alt_llm.with_structured_output(schema)
+            failed_model = _WORKING_OPENROUTER_MODEL
+    elif eff_provider == "google_genai" and failed_model in _UNAVAILABLE_MODELS and _WORKING_GOOGLE_MODEL and _WORKING_GOOGLE_MODEL not in _UNAVAILABLE_MODELS:
         alt_llm = resolve_chat_model(
             model_name=_WORKING_GOOGLE_MODEL,
             provider="google_genai",
@@ -668,6 +681,8 @@ def invoke_with_model_fallback(
                 res = alt_chain.invoke(prompt_input)
                 if eff_provider == "google_genai":
                     _WORKING_GOOGLE_MODEL = cand
+                elif eff_provider == "openrouter":
+                    _WORKING_OPENROUTER_MODEL = cand
                 logger.info("[AgentSwarm LLM] Recovered from '%s' error -> using '%s'", failed_model, cand)
                 return res, cand
             except Exception as cand_exc:
