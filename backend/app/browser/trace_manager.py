@@ -44,7 +44,7 @@ class TraceArtifact(BaseModel):
     events: list[TraceEvent] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
-    overall_status: Literal["passed", "failed", "running"] = "running"
+    overall_status: Literal["passed", "failed", "stuck", "running"] = "running"
 
 
 class TraceManager:
@@ -130,7 +130,7 @@ class TraceManager:
     def stop_trace(
         self,
         trace_id: str,
-        overall_status: Literal["passed", "failed"] = "passed",
+        overall_status: Literal["passed", "failed", "stuck"] = "passed",
         context: Optional[Any] = None,
         save_to_disk: bool = False,
         video_url: Optional[str] = None,

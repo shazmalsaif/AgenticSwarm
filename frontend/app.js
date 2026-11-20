@@ -1470,9 +1470,9 @@ const AgentSwarm = {
       if (!key || !val) return;
       this.partialCache[key] = val;
       if (key === 'test_plan') {
-        const scenarios = val.scenarios || [];
+        const goals = val.goals || val.scenarios || [];
         const scEl = document.getElementById('ws-kpi-scenarios');
-        if (scEl) scEl.textContent = String(scenarios.length);
+        if (scEl) scEl.textContent = String(goals.length);
         this.renderPlanTab(val);
       } else if (key === 'personas') {
         const pList = val.personas || [];
@@ -1575,14 +1575,14 @@ const AgentSwarm = {
         this.state.animIntervalId = null;
       }
       this.stopStreamListeners();
-      const scenarios = run?.test_plan?.scenarios || [];
+      const goals = run?.test_plan?.goals || run?.test_plan?.scenarios || [];
       const personas = run?.personas?.personas || [];
       const traces = run?.trace_artifacts || [];
       const diagnoses = run?.triage_report?.diagnoses || [];
       const suggestions = run?.healing_report?.suggestions || [];
 
       const updates = [
-        { badge: 'DONE', stat: `${scenarios.length} scenario(s) planned` },
+        { badge: 'DONE', stat: `${goals.length} goal(s) set` },
         { badge: 'DONE', stat: `${personas.length} persona(s) created` },
         { badge: 'DONE', stat: `${traces.length} trace artifact(s)` },
         { badge: diagnoses.length ? 'TRIAGED' : 'CLEAN', stat: `${diagnoses.length} failure(s) analyzed` },
@@ -1665,6 +1665,7 @@ const AgentSwarm = {
             target_url: targetUrl,
             objectives,
             persona_count: personaCount,
+            raw_failures: rawFailures,
             use_live_browser: useLiveBrowser,
             record_traces: true,
             provider,
@@ -1791,7 +1792,7 @@ const AgentSwarm = {
         kpiStatus.textContent = statusStr;
       }
 
-      const scenarios = run.test_plan?.scenarios || [];
+      const goals = run.test_plan?.goals || run.test_plan?.scenarios || [];
       const personas = run.personas?.personas || [];
       const navResults = run.navigation_results || [];
       const totalSteps = navResults.reduce((acc, nr) => acc + (nr.steps?.length || 0), 0);
@@ -1800,7 +1801,7 @@ const AgentSwarm = {
         const el = document.getElementById(id);
         if (el) el.textContent = txt;
       };
-      setTxt('ws-kpi-scenarios', String(run.scenarios_count ?? scenarios.length));
+      setTxt('ws-kpi-scenarios', String(run.scenarios_count ?? goals.length));
       setTxt('ws-kpi-personas', String(run.personas_count ?? personas.length));
       setTxt('ws-kpi-steps', String(totalSteps));
       setTxt('ws-kpi-healed', `${run.healed_count ?? 0} / ${run.failures_count ?? 0}`);
@@ -1830,7 +1831,7 @@ const AgentSwarm = {
 
     populateFeedFromRun(run, isPlanPreview = false) {
       this.clearAgentFeed();
-      const scenarios = run?.test_plan?.scenarios || [];
+      const goals = run?.test_plan?.goals || run?.test_plan?.scenarios || [];
       const personas = run?.personas?.personas || [];
       const navResults = run?.navigation_results || [];
       const diagnoses = run?.triage_report?.diagnoses || [];
@@ -1849,7 +1850,7 @@ const AgentSwarm = {
 
       push(
         'Planner Agent',
-        `Generated ${scenarios.length} scenario(s) via ${run?.test_plan?.generated_by || 'agent'}: ${scenarios.map((s) => s.title).join(', ')}`,
+        `Set ${goals.length} goal(s) via ${run?.test_plan?.generated_by || 'agent'}: ${goals.map((g) => g.title).join(', ')}`,
         'success'
       );
       push(
@@ -1867,6 +1868,10 @@ const AgentSwarm = {
               st.status === 'passed' ? 'success' : 'error'
             );
           });
+          if (nr.completion_reason) {
+            const stType = nr.overall_status === 'passed' ? 'success' : (nr.overall_status === 'stuck' ? 'warning' : 'error');
+            push('Navigator Agent', `${nr.scenario_id} -> ${String(nr.overall_status || 'done').toUpperCase()}: ${nr.completion_reason}`, stType);
+          }
         });
         if (diagnoses.length) {
           push('Triage Agent', `Classified ${diagnoses.length} failure(s).`, 'warning');
@@ -1880,9 +1885,9 @@ const AgentSwarm = {
     renderPlanTab(testPlan) {
       const container = document.getElementById('tab-panel-plan');
       if (!container) return;
-      const scenarios = testPlan.scenarios || [];
-      if (!scenarios.length) {
-        container.innerHTML = '<p class="text-xs font-mono text-neutral-500">No scenarios generated yet.</p>';
+      const goals = testPlan.goals && testPlan.goals.length ? testPlan.goals : (testPlan.scenarios || []);
+      if (!goals.length) {
+        container.innerHTML = '<p class="text-xs font-mono text-neutral-500">No goals generated yet.</p>';
         return;
       }
 
@@ -1896,42 +1901,29 @@ const AgentSwarm = {
         ? `<div class="p-3.5 rounded-lg bg-[#f4f3f1] border border-border-hairline text-xs font-mono text-neutral-800 flex flex-wrap items-center justify-between gap-2"><span>${escapeHtml(testPlan.summary || '')}</span>${engineBadge}</div>`
         : '';
 
-      const cardsHtml = scenarios.map((sc) => {
-        const stepsHtml = (sc.steps || []).map((st) => `
-          <tr class="border-t border-border-hairline">
-            <td class="py-1.5 pr-3 font-mono text-neutral-500">${escapeHtml(st.step_number)}</td>
-            <td class="py-1.5 pr-3 font-mono font-semibold text-black">${escapeHtml(st.action)}</td>
-            <td class="py-1.5 pr-3 text-neutral-700">${escapeHtml(st.description)}</td>
-            <td class="py-1.5 font-mono text-[11px] text-neutral-500">${escapeHtml(st.target_hint || '-')}</td>
-          </tr>
-        `).join('');
+      const cardsHtml = goals.map((g, idx) => {
+        const gid = g.goal_id || g.scenario_id || `GOAL-${idx + 1}`;
+        const objective = g.objective || g.description || '';
+        const criteria = g.success_criteria || g.expected_result || '';
+        const hasSteps = Array.isArray(g.steps) && g.steps.length > 0;
+        const stepsTable = hasSteps
+          ? `<div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead><tr class="text-[10px] font-mono uppercase text-neutral-400"><th class="pb-1.5 pr-3">#</th><th class="pb-1.5 pr-3">Action</th><th class="pb-1.5 pr-3">Description</th><th class="pb-1.5">Locator</th></tr></thead><tbody>${g.steps.map((st) => `<tr class="border-t border-border-hairline"><td class="py-1.5 pr-3 font-mono text-neutral-500">${escapeHtml(st.step_number)}</td><td class="py-1.5 pr-3 font-mono font-semibold text-black">${escapeHtml(st.action)}</td><td class="py-1.5 pr-3 text-neutral-700">${escapeHtml(st.description)}</td><td class="py-1.5 font-mono text-[11px] text-neutral-500">${escapeHtml(st.target_hint || '-')}</td></tr>`).join('')}</tbody></table></div>`
+          : `<div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border-hairline text-[11px] font-mono"><span class="text-neutral-600"><strong>Success criteria:</strong> ${escapeHtml(criteria || 'Verified via live DOM exploration')}</span><span class="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-semibold">AUTONOMOUS STEP LOOP</span></div>`;
 
         return `
           <div class="rounded-lg border border-border-hairline p-4 bg-white space-y-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div class="flex items-center gap-2">
-                <span class="px-2 py-0.5 rounded bg-black text-white text-[10px] font-mono">${escapeHtml(sc.scenario_id)}</span>
-                <h4 class="font-syne font-bold text-sm text-black">${escapeHtml(sc.title)}</h4>
+                <span class="px-2 py-0.5 rounded bg-black text-white text-[10px] font-mono">${escapeHtml(gid)}</span>
+                <h4 class="font-syne font-bold text-sm text-black">${escapeHtml(g.title)}</h4>
               </div>
               <div class="flex items-center gap-2 text-[10px] font-mono">
-                <span class="px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-700 uppercase">${escapeHtml(sc.category || 'e2e')}</span>
-                <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 uppercase">${escapeHtml(sc.priority || 'medium')}</span>
+                <span class="px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-700 uppercase">${escapeHtml(g.category || 'e2e')}</span>
+                <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 uppercase">${escapeHtml(g.priority || 'medium')}</span>
               </div>
             </div>
-            <p class="text-xs text-neutral-600">${escapeHtml(sc.description || '')}</p>
-            <div class="overflow-x-auto">
-              <table class="w-full text-left text-xs">
-                <thead>
-                  <tr class="text-[10px] font-mono uppercase text-neutral-400">
-                    <th class="pb-1.5 pr-3">#</th>
-                    <th class="pb-1.5 pr-3">Action</th>
-                    <th class="pb-1.5 pr-3">Description</th>
-                    <th class="pb-1.5">Selector / Hint</th>
-                  </tr>
-                </thead>
-                <tbody>${stepsHtml}</tbody>
-              </table>
-            </div>
+            <p class="text-xs text-neutral-700">${escapeHtml(objective)}</p>
+            ${stepsTable}
           </div>
         `;
       }).join('');
@@ -2010,6 +2002,13 @@ const AgentSwarm = {
           `;
         }).join('');
 
+        const goalStatus = String(nr.overall_status || 'passed').toUpperCase();
+        const goalCls = nr.overall_status === 'passed'
+          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+          : nr.overall_status === 'stuck'
+            ? 'bg-amber-50 text-amber-900 border-amber-300'
+            : 'bg-red-50 text-red-800 border-red-200';
+
         return `
           <div class="rounded-lg border border-border-hairline p-4 bg-white space-y-3">
             <div class="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
@@ -2018,10 +2017,12 @@ const AgentSwarm = {
                 <span class="font-syne font-bold text-sm text-black">${escapeHtml(nr.scenario_title)}</span>
               </div>
               <div class="flex items-center gap-2 text-[11px]">
-                <span class="px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-700">${escapeHtml(nr.execution_mode || 'simulated')}</span>
+                <span class="px-2 py-0.5 rounded border font-bold ${goalCls}">${escapeHtml(goalStatus)}</span>
+                <span class="px-2 py-0.5 rounded bg-[#f4f3f1] text-neutral-700">${escapeHtml(nr.execution_mode || 'playwright')}</span>
                 ${trace ? `<span class="text-neutral-500">Trace: ${escapeHtml(trace.trace_id)}</span>` : ''}
               </div>
             </div>
+            ${nr.completion_reason ? `<div class="text-[11px] font-mono text-neutral-600">${escapeHtml(nr.completion_reason)}</div>` : ''}
             <div class="space-y-2">${stepsHtml}</div>
           </div>
         `;
@@ -2058,18 +2059,30 @@ const AgentSwarm = {
         return;
       }
 
-      const diagHtml = diagnoses.map((d) => `
+      const diagHtml = diagnoses.map((d) => {
+        const badgeTxt = d.needs_healing
+          ? 'ELIGIBLE FOR SELF-HEALING'
+          : (d.category === 'NAVIGATION_MISSING' || d.category === 'OVERLAY_BLOCKING')
+            ? String(d.category).replace('_', ' ')
+            : 'HUMAN REVIEW';
+        const badgeCls = d.needs_healing
+          ? 'bg-emerald-100 text-emerald-900'
+          : (d.category === 'NAVIGATION_MISSING' || d.category === 'OVERLAY_BLOCKING')
+            ? 'bg-amber-100 text-amber-900'
+            : 'bg-red-100 text-red-900';
+        return `
         <div class="rounded-lg border border-border-hairline p-4 bg-[#faf9f7] space-y-2 text-xs font-mono">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <span class="font-bold text-black">${escapeHtml(d.failure_id)} • ${escapeHtml(d.category)}</span>
-            <span class="px-2 py-0.5 rounded ${d.needs_healing ? 'bg-emerald-100 text-emerald-900' : 'bg-red-100 text-red-900'} text-[10px] font-semibold">
-              ${d.needs_healing ? 'ELIGIBLE FOR SELF-HEALING' : 'HUMAN REVIEW'}
+            <span class="px-2 py-0.5 rounded ${badgeCls} text-[10px] font-semibold">
+              ${escapeHtml(badgeTxt)}
             </span>
           </div>
           <p class="text-neutral-700 font-sans">${escapeHtml(d.root_cause_summary)}</p>
           <div class="text-[11px] text-neutral-500">Verdict: ${escapeHtml(d.verdict)} (Confidence: ${Math.round((d.confidence || 0) * 100)}%)</div>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       const healHtml = suggestions.map((s, idx) => this.buildHealingCardHtml(s, `ws-heal-${idx}`)).join('');
       output.innerHTML = diagHtml + healHtml;

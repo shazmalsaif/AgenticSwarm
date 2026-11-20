@@ -7,7 +7,6 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .planner_agent import invoke_with_model_fallback, resolve_chat_model
 
@@ -22,12 +21,15 @@ class FailureEvidence(BaseModel):
     scenario_title: Optional[str] = None
     step_number: Optional[int] = None
     target_url: str = ""
+    current_url: Optional[str] = None
     error_message: str
     failed_selector: Optional[str] = None
     http_status: Optional[int] = None
     console_errors: list[str] = Field(default_factory=list)
     network_failures: list[str] = Field(default_factory=list)
     dom_excerpt: Optional[str] = None
+    screenshot_b64: Optional[str] = None
+    blocking_overlay: Optional[str] = None
     action_description: Optional[str] = None
 
 
@@ -36,6 +38,8 @@ class TriageDiagnosis(BaseModel):
 
     failure_id: str
     category: Literal[
+        "NAVIGATION_MISSING",
+        "OVERLAY_BLOCKING",
         "SELECTOR_DRIFT",
         "BACKEND_API_ERROR",
         "NETWORK_TIMEOUT",
@@ -62,8 +66,6 @@ class TriageReport(BaseModel):
 
 
 class TriageGraphState(TypedDict, total=False):
-    """LangGraph state contract for TriageAgent workflow."""
-
     target_url: str
     raw_failures: list[Any]
     dom_snapshot: Optional[str]
@@ -77,15 +79,18 @@ class TriageAgent:
     """
     Model-agnostic root-cause triage agent powered by LangChain & LangGraph.
 
-    Uses `ChatPromptTemplate | llm.with_structured_output(TriageDiagnosis)` inside a
-    compiled LangGraph `StateGraph` (`collect_failures -> classify_failures -> route_healing_candidates`).
+    Checks page URL (`about:blank` -> NAVIGATION_MISSING) and blocking overlays
+    (`OVERLAY_BLOCKING`) BEFORE ever classifying anything as BACKEND_API_ERROR or NETWORK_TIMEOUT.
     """
 
     SYSTEM_PROMPT = (
-        "You are the Diagnosis & Triage Agent for AgentSwarm. Classify each test failure into "
-        "SELECTOR_DRIFT, BACKEND_API_ERROR, NETWORK_TIMEOUT, ASSERTION_FAILURE, or CONSOLE_EXCEPTION. "
-        "Set needs_healing=True and recommended_next_agent='healing_agent' ONLY when the root cause "
-        "is SELECTOR_DRIFT with a broken selector and healthy backend behavior."
+        "You are the Diagnosis & Triage Agent for AgentSwarm. Classify each test failure into one of: "
+        "NAVIGATION_MISSING, OVERLAY_BLOCKING, SELECTOR_DRIFT, BACKEND_API_ERROR, NETWORK_TIMEOUT, "
+        "ASSERTION_FAILURE, or CONSOLE_EXCEPTION.\n"
+        "CRITICAL RULES:\n"
+        "- If Current URL is 'about:blank' or empty -> ALWAYS classify as NAVIGATION_MISSING (NEVER backend/network).\n"
+        "- If a visible Blocking Overlay (#intro-overlay, modal, dialog backdrop) intercepted clicks -> ALWAYS classify as OVERLAY_BLOCKING (NEVER backend/network).\n"
+        "- Set needs_healing=True and recommended_next_agent='healing_agent' ONLY for SELECTOR_DRIFT with healthy backend."
     )
 
     def __init__(
@@ -111,8 +116,10 @@ class TriageAgent:
                 (
                     "human",
                     "Failure ID: {failure_id}\n"
+                    "Current URL: {current_url}\n"
                     "Target URL: {target_url}\n"
-                    "Scenario: {scenario_id} - {scenario_title}\n"
+                    "Blocking Overlay: {blocking_overlay}\n"
+                    "Goal: {scenario_id} - {scenario_title}\n"
                     "Action Description: {action_description}\n"
                     "Failed Selector: {failed_selector}\n"
                     "HTTP Status: {http_status}\n"
@@ -128,18 +135,78 @@ class TriageAgent:
 
     @staticmethod
     def _coerce_evidence(evidence: FailureEvidence | dict[str, Any], index: int = 1) -> FailureEvidence:
-        if isinstance(evidence, FailureEvidence):
-            item = evidence.model_copy()
-        else:
-            item = FailureEvidence.model_validate(evidence)
+        item = evidence.model_copy() if isinstance(evidence, FailureEvidence) else FailureEvidence.model_validate(evidence)
         if not item.failure_id:
             item.failure_id = f"FAIL-{index:03d}"
+        if item.current_url is None and item.target_url:
+            item.current_url = item.target_url
         return item
 
+    @staticmethod
+    def _check_environment_root_cause(item: FailureEvidence) -> Optional[TriageDiagnosis]:
+        """Run mandatory pre-checks for missing navigation (about:blank) and blocking overlays before network/backend triage."""
+        url_check = (item.current_url or item.target_url or "").strip().lower()
+        err_low = (item.error_message or "").lower()
+        dom_low = (item.dom_excerpt or "").lower()
+
+        if not url_check or url_check.startswith("about:blank") or "about:blank" in err_low or "not navigated to target app" in err_low:
+            return TriageDiagnosis(
+                failure_id=item.failure_id or "FAIL-001",
+                category="NAVIGATION_MISSING",
+                severity="critical",
+                confidence=0.99,
+                root_cause_summary=(
+                    f"Browser page remained at '{url_check or 'about:blank'}' without navigating to the target URL. "
+                    "Not a backend API or network timeout failure."
+                ),
+                verdict="Missing Navigation (about:blank)",
+                needs_healing=False,
+                recommended_next_agent="human_review",
+                evidence_highlights=[
+                    f"current_url={url_check or 'empty'}",
+                    item.error_message[:140],
+                ],
+            )
+
+        has_overlay = bool(item.blocking_overlay) or any(
+            tok in err_low
+            for tok in ("intercepts pointer events", "blocking overlay", "intro-overlay", "other element would receive pointer")
+        ) or (
+            any(tok in err_low for tok in ("timeout", "not visible", "waiting for locator"))
+            and 'id="intro-overlay"' in dom_low
+        )
+        if has_overlay:
+            ov_name = item.blocking_overlay or ("#intro-overlay" if "intro-overlay" in (err_low + dom_low) else "visible modal/overlay")
+            return TriageDiagnosis(
+                failure_id=item.failure_id or "FAIL-001",
+                category="OVERLAY_BLOCKING",
+                severity="high",
+                confidence=0.98,
+                root_cause_summary=(
+                    f"Visible blocking overlay '{ov_name}' intercepted interaction during step execution. "
+                    "Dismiss or wait for overlay clearance first; not a backend or network error."
+                ),
+                verdict=f"Blocked by Overlay ({ov_name})",
+                needs_healing=False,
+                recommended_next_agent="retry_verification",
+                evidence_highlights=[
+                    f"blocking_overlay={ov_name}",
+                    f"current_url={item.current_url or item.target_url}",
+                    item.error_message[:140],
+                ],
+            )
+        return None
+
     def _invoke_chain(self, item: FailureEvidence) -> TriageDiagnosis:
+        env_diag = self._check_environment_root_cause(item)
+        if env_diag is not None:
+            return env_diag
+
         prompt_input = {
             "failure_id": item.failure_id or "FAIL-001",
+            "current_url": item.current_url or item.target_url or "N/A",
             "target_url": item.target_url,
+            "blocking_overlay": item.blocking_overlay or "None",
             "scenario_id": item.scenario_id or "N/A",
             "scenario_title": item.scenario_title or "N/A",
             "action_description": item.action_description or "N/A",
@@ -164,11 +231,18 @@ class TriageAgent:
         if not isinstance(result, TriageDiagnosis):
             result = TriageDiagnosis.model_validate(result)
         result.failure_id = item.failure_id or result.failure_id
+
+        # Hard guardrail: LLM may never blame backend/network when url was blank or overlay blocked
+        guardrail = self._check_environment_root_cause(item)
+        if guardrail is not None:
+            return guardrail
         return result
 
     def triage_failure(self, evidence: FailureEvidence | dict[str, Any]) -> TriageDiagnosis:
-        """Analyze a single failure evidence record and return a structured diagnosis."""
         item = self._coerce_evidence(evidence)
+        env_diag = self._check_environment_root_cause(item)
+        if env_diag is not None:
+            return env_diag
         if self._chain:
             try:
                 return self._invoke_chain(item)
@@ -178,7 +252,13 @@ class TriageAgent:
 
     def _node_collect_failures(self, state: TriageGraphState) -> dict[str, Any]:
         raw_failures = list(state.get("raw_failures") or [])
-        coerced = [self._coerce_evidence(item, index=i) for i, item in enumerate(raw_failures, start=1)]
+        fallback_dom = state.get("dom_snapshot")
+        coerced: list[FailureEvidence] = []
+        for i, item in enumerate(raw_failures, start=1):
+            ev = self._coerce_evidence(item, index=i)
+            if not ev.dom_excerpt and fallback_dom:
+                ev.dom_excerpt = str(fallback_dom)[:2000]
+            coerced.append(ev)
         return {"coerced_failures": coerced}
 
     def _node_classify_failures(self, state: TriageGraphState) -> dict[str, Any]:
@@ -188,26 +268,29 @@ class TriageAgent:
         used_llm = False
 
         for item in coerced:
+            env_diag = self._check_environment_root_cause(item)
+            if env_diag is not None:
+                diagnoses.append(env_diag)
+                continue
             if self._chain:
                 try:
-                    diag = self._invoke_chain(item)
+                    diagnoses.append(self._invoke_chain(item))
                     used_llm = True
+                    continue
                 except Exception as exc:
-                    logger.warning("[TriageAgent] Batch item %s LangChain error, falling back: %s", item.failure_id, exc)
-                    diag = self._classify_deterministically(item)
-            else:
-                diag = self._classify_deterministically(item)
-            diagnoses.append(diag)
+                    logger.warning("[TriageAgent] Item %s LangChain error, falling back: %s", item.failure_id, exc)
+            diagnoses.append(self._classify_deterministically(item))
 
         healing_count = sum(1 for d in diagnoses if d.needs_healing)
-        report = TriageReport(
-            target_url=target_url,
-            total_failures=len(diagnoses),
-            healing_candidates=healing_count,
-            diagnoses=diagnoses,
-            generated_by="langchain" if used_llm else "deterministic_fallback",
-        )
-        return {"triage_report": report}
+        return {
+            "triage_report": TriageReport(
+                target_url=target_url,
+                total_failures=len(diagnoses),
+                healing_candidates=healing_count,
+                diagnoses=diagnoses,
+                generated_by="langchain" if used_llm else "deterministic_fallback",
+            )
+        }
 
     @staticmethod
     def _node_route_healing_candidates(state: TriageGraphState) -> dict[str, Any]:
@@ -224,63 +307,53 @@ class TriageAgent:
                         "failed_selector": evidence_item.failed_selector,
                         "action_description": evidence_item.action_description,
                         "dom_excerpt": evidence_item.dom_excerpt or state.get("dom_snapshot"),
-                        "target_url": evidence_item.target_url or target_url,
+                        "target_url": evidence_item.current_url or evidence_item.target_url or target_url,
+                        "blocking_overlay": evidence_item.blocking_overlay,
                         "error_message": evidence_item.error_message,
                     }
                 )
 
-        return {
-            "healing_candidates": healing_candidates,
-            "needs_healing": bool(healing_candidates),
-        }
+        return {"healing_candidates": healing_candidates, "needs_healing": bool(healing_candidates)}
 
     def build_triage_graph(self):
-        """Build and compile the internal LangGraph workflow for failure triage & healing routing."""
         builder = StateGraph(TriageGraphState)
         builder.add_node("collect_failures", self._node_collect_failures)
         builder.add_node("classify_failures", self._node_classify_failures)
         builder.add_node("route_healing_candidates", self._node_route_healing_candidates)
-
         builder.add_edge(START, "collect_failures")
         builder.add_edge("collect_failures", "classify_failures")
         builder.add_edge("classify_failures", "route_healing_candidates")
         builder.add_edge("route_healing_candidates", END)
         return builder.compile()
 
-    def triage_batch(
-        self,
-        failures: list[FailureEvidence | dict[str, Any]],
-        target_url: str = "",
-    ) -> TriageReport:
-        """Execute the compiled LangGraph triage workflow across a batch of failures."""
-        result_state = self._graph.invoke({"raw_failures": failures, "target_url": target_url})
-        return result_state["triage_report"]
+    def triage_batch(self, failures: list[FailureEvidence | dict[str, Any]], target_url: str = "") -> TriageReport:
+        return self._graph.invoke({"raw_failures": failures, "target_url": target_url})["triage_report"]
 
-    @staticmethod
-    def _classify_deterministically(item: FailureEvidence) -> TriageDiagnosis:
+    @classmethod
+    def _classify_deterministically(cls, item: FailureEvidence) -> TriageDiagnosis:
+        env_diag = cls._check_environment_root_cause(item)
+        if env_diag is not None:
+            return env_diag
+
         err_lower = (item.error_message or "").lower()
         http_status = item.http_status
         highlights: list[str] = []
 
         if http_status is not None and http_status >= 400 and http_status != 504:
-            highlights.append(f"HTTP status {http_status} returned from target endpoint")
-            if item.network_failures:
-                highlights.extend(item.network_failures[:2])
+            highlights.append(f"HTTP {http_status} from target endpoint")
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
                 category="BACKEND_API_ERROR",
                 severity="critical" if http_status >= 500 else "high",
                 confidence=0.96,
-                root_cause_summary=f"Server returned HTTP {http_status} response: {item.error_message[:180]}",
+                root_cause_summary=f"Server returned HTTP {http_status}: {item.error_message[:180]}",
                 verdict="Backend API / Server Error (Self-Healing Suppressed)",
                 needs_healing=False,
                 recommended_next_agent="human_review",
                 evidence_highlights=highlights,
             )
 
-        if item.network_failures and any(
-            code in nf for nf in item.network_failures for code in ("500", "502", "503", "400", "401", "403")
-        ):
+        if item.network_failures and any(c in nf for nf in item.network_failures for c in ("500", "502", "503", "400", "401", "403")):
             highlights.extend(item.network_failures[:3])
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
@@ -296,7 +369,7 @@ class TriageAgent:
 
         network_markers = ("net::err_", "econnrefused", "enotfound", "navigation timeout", "gateway timeout", "err_connection")
         if http_status == 504 or any(marker in err_lower for marker in network_markers):
-            highlights.append(f"Network connectivity or navigation timeout: {item.error_message[:120]}")
+            highlights.append(item.error_message[:120])
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
                 category="NETWORK_TIMEOUT",
@@ -318,48 +391,35 @@ class TriageAgent:
             "strict mode violation",
             "resolved to 0 elements",
         )
-        has_selector_drift = bool(item.failed_selector) and (
-            any(marker in err_lower for marker in selector_markers) or "timeout" in err_lower or "not found" in err_lower
-        )
-        if not has_selector_drift and any(marker in err_lower for marker in selector_markers):
-            has_selector_drift = True
-
-        if has_selector_drift:
+        if any(m in err_lower for m in selector_markers) or (
+            item.failed_selector and any(m in err_lower for m in ("timeout", "not found", "disabled"))
+        ):
             highlights.append(f"Failed selector: {item.failed_selector or 'unspecified'}")
-            if http_status is not None:
-                highlights.append(f"Healthy HTTP {http_status} confirmed (pure markup refactor)")
-            if item.dom_excerpt:
-                highlights.append("DOM snapshot available for semantic ARIA locator synthesis")
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
                 category="SELECTOR_DRIFT",
                 severity="medium",
-                confidence=0.95 if item.failed_selector else 0.85,
-                root_cause_summary=(
-                    f"UI selector '{item.failed_selector or 'target'}' failed while application remained responsive. "
-                    "Likely DOM markup or attribute refactor."
-                ),
-                verdict="Pure Markup / Selector Drift -> Triggering Healing Agent",
+                confidence=0.94,
+                root_cause_summary=f"UI selector '{item.failed_selector or 'target'}' could not resolve while page remained reachable.",
+                verdict="Selector Drift -> Triggering Healing Agent",
                 needs_healing=True,
                 recommended_next_agent="healing_agent",
                 evidence_highlights=highlights,
             )
 
         if item.console_errors:
-            highlights.extend(item.console_errors[:3])
             return TriageDiagnosis(
                 failure_id=item.failure_id or "FAIL-001",
                 category="CONSOLE_EXCEPTION",
                 severity="high",
                 confidence=0.88,
-                root_cause_summary=f"Uncaught browser runtime console error detected: {item.console_errors[0][:160]}",
+                root_cause_summary=f"Uncaught browser console error: {item.console_errors[0][:160]}",
                 verdict="Frontend JavaScript Runtime Exception",
                 needs_healing=False,
                 recommended_next_agent="human_review",
-                evidence_highlights=highlights,
+                evidence_highlights=item.console_errors[:3],
             )
 
-        highlights.append(item.error_message[:160])
         return TriageDiagnosis(
             failure_id=item.failure_id or "FAIL-001",
             category="ASSERTION_FAILURE",
@@ -369,19 +429,16 @@ class TriageAgent:
             verdict="Functional Assertion Mismatch",
             needs_healing=False,
             recommended_next_agent="human_review",
-            evidence_highlights=highlights,
+            evidence_highlights=[item.error_message[:160]],
         )
 
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph parent-graph node entrypoint for root-cause failure triage."""
         target_url = state.get("target_url", "")
         raw_failures: list[Any] = list(state.get("raw_failures") or [])
-
         if not raw_failures and state.get("navigation_results"):
             for nav in state["navigation_results"]:
                 if isinstance(nav, dict):
                     raw_failures.extend(nav.get("failures") or [])
-
         result_state = self._graph.invoke(
             {
                 "raw_failures": raw_failures,
@@ -398,5 +455,4 @@ class TriageAgent:
 
 
 def triage_node(state: dict[str, Any]) -> dict[str, Any]:
-    """Functional LangGraph node wrapper around TriageAgent."""
     return TriageAgent().run_node(state)

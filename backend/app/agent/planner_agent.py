@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal, Optional, TypedDict
 
@@ -19,7 +20,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
-# Load environment variables from backend/.env if present
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 if _ENV_PATH.exists():
     load_dotenv(dotenv_path=_ENV_PATH)
@@ -42,14 +42,7 @@ def parse_provider_and_model(
     provider: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """
-    Parse provider and model_name without breaking model suffixes like ':free'.
-
-    Examples:
-    - ('openrouter', 'baidu/ernie-5.5-flash-preview:free') -> ('openrouter', 'baidu/ernie-5.5-flash-preview:free')
-    - (None, 'openrouter:baidu/ernie-5.5-flash-preview:free') -> ('openrouter', 'baidu/ernie-5.5-flash-preview:free')
-    - (None, 'baidu/ernie-5.5-flash-preview:free') -> ('openrouter', 'baidu/ernie-5.5-flash-preview:free')
-    """
+    """Parse provider and model_name without breaking OpenRouter ':free' model suffixes."""
     parsed_provider = (provider or "").strip().lower() or None
     parsed_model = (model_name or "").strip() or None
 
@@ -118,14 +111,12 @@ AVAILABLE_MODELS: list[dict[str, str]] = [
         "id": "google_genai:gemini-2.5-flash",
         "provider": "google_genai",
         "model_name": "gemini-2.5-flash",
-        "label": "Gemini 2.5 Flash — Fast & Recommended",
         "label": "Gemini 2.5 Flash",
     },
     {
         "id": "google_genai:gemini-2.5-pro",
         "provider": "google_genai",
         "model_name": "gemini-2.5-pro",
-        "label": "Gemini 2.5 Pro — Deep Reasoning",
         "label": "Gemini 2.5 Pro",
     },
     {
@@ -164,22 +155,56 @@ AVAILABLE_MODELS: list[dict[str, str]] = [
         "model_name": "gpt-4o",
         "label": "OpenAI • GPT-4o",
     },
-    {
-        "id": "deterministic:deterministic-fallback",
-        "provider": "deterministic",
-        "model_name": "deterministic-fallback",
-        "label": "Deterministic DOM Engine (Offline / Instant)",
-    },
 ]
 
 _DISCOVERED_GOOGLE_MODELS_CACHE: Optional[list[str]] = None
+_DISCOVERED_OPENROUTER_FREE_MODELS_CACHE: Optional[list[str]] = None
 _UNAVAILABLE_MODELS: set[str] = set()
 _WORKING_GOOGLE_MODEL: Optional[str] = None
 _WORKING_OPENROUTER_MODEL: Optional[str] = None
 
 
+def _discover_openrouter_free_models() -> list[str]:
+    """Query OpenRouter live catalog for currently active ':free' models, sorting non-reasoning instruct models first."""
+    global _DISCOVERED_OPENROUTER_FREE_MODELS_CACHE
+    if _DISCOVERED_OPENROUTER_FREE_MODELS_CACHE is not None:
+        return list(_DISCOVERED_OPENROUTER_FREE_MODELS_CACHE)
+
+    found: list[str] = []
+    try:
+        import httpx
+
+        resp = httpx.get(f"{OPENROUTER_BASE_URL}/models", timeout=8.0)
+        if resp.status_code < 400:
+            items = resp.json().get("data") or []
+            raw_ids = [
+                str(m.get("id") or "").strip()
+                for m in items
+                if isinstance(m, dict) and str(m.get("id") or "").strip().endswith(":free")
+            ]
+
+            def _rank(mid: str) -> tuple[int, str]:
+                low = mid.lower()
+                is_reasoning = any(tok in low for tok in ("think", "-r1", "reason", "qwq", "preview"))
+                score = 50 if is_reasoning else 0
+                if any(tok in low for tok in ("gemma-3-27b", "llama-3.3-70b", "deepseek-chat", "mistral", "qwen")):
+                    score -= 20
+                elif any(tok in low for tok in ("llama", "gemma", "qwen")):
+                    score -= 10
+                if "instruct" in low or "-it:" in low:
+                    score -= 5
+                return (score, low)
+
+            found = sorted(dict.fromkeys(raw_ids), key=_rank)[:12]
+    except Exception as exc:
+        logger.debug("[AgentSwarm LLM] OpenRouter model discovery skipped: %s", exc)
+
+    if found:
+        _DISCOVERED_OPENROUTER_FREE_MODELS_CACHE = found
+    return list(found)
+
+
 def _discover_google_models(api_key: Optional[str] = None) -> list[str]:
-    """Query Google GenAI API once to discover Gemini model IDs supported by the current key."""
     global _DISCOVERED_GOOGLE_MODELS_CACHE
     if _DISCOVERED_GOOGLE_MODELS_CACHE is not None:
         return list(_DISCOVERED_GOOGLE_MODELS_CACHE)
@@ -215,12 +240,10 @@ def _get_configured_providers() -> dict[str, bool]:
         "google_genai": bool((os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()),
         "openrouter": bool((os.getenv("OPENROUTER_API_KEY") or "").strip()),
         "openai": bool((os.getenv("OPENAI_API_KEY") or "").strip()),
-        "deterministic": True,
     }
 
 
 def list_available_models() -> dict[str, Any]:
-    """Return catalog of selectable LLM providers/models and local API key readiness."""
     configured_providers = _get_configured_providers()
     env_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
     if env_provider in ("google", "gemini"):
@@ -235,11 +258,9 @@ def list_available_models() -> dict[str, Any]:
     elif configured_providers["openai"]:
         default_provider = "openai"
     else:
-        default_provider = "deterministic"
+        default_provider = "openrouter"
 
-    discovered_google: list[str] = []
-    if configured_providers["google_genai"]:
-        discovered_google = _discover_google_models()
+    discovered_google = _discover_google_models() if configured_providers["google_genai"] else []
 
     env_model = (os.getenv("LLM_MODEL") or "").strip()
     if env_model:
@@ -261,16 +282,9 @@ def list_available_models() -> dict[str, Any]:
     elif default_provider == "openai":
         default_model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
     else:
-        default_model = "deterministic-fallback"
+        default_model = ""
 
-    models_out = [
-        {
-            **entry,
-            "configured": bool(configured_providers.get(entry["provider"], False)),
-        }
-        for entry in AVAILABLE_MODELS
-    ]
-
+    models_out = [{**entry, "configured": bool(configured_providers.get(entry["provider"], False))} for entry in AVAILABLE_MODELS]
     known_ids = {m["id"] for m in models_out}
     for g_model in discovered_google[:8]:
         gid = f"google_genai:{g_model}"
@@ -295,7 +309,7 @@ def list_available_models() -> dict[str, Any]:
 
 
 def _extract_json_payload(raw_text: str) -> Any:
-    """Extract and parse a JSON object or array from raw LLM output (handling <think> tags and fences)."""
+    """Extract and parse a JSON object or array from raw LLM output."""
     cleaned = re.sub(r"<think>.*?</think>", "", raw_text or "", flags=re.S | re.I).strip()
 
     try:
@@ -347,34 +361,38 @@ def _extract_json_payload(raw_text: str) -> Any:
 
 
 def _build_compact_schema_hint(schema: type[BaseModel]) -> str:
-    """Return a concise, concrete JSON skeleton example without verbose $defs/$ref noise."""
+    """Return a concise JSON skeleton example so free models adhere cleanly without $defs noise."""
     name = getattr(schema, "__name__", "")
     if name == "TestPlanResult":
         return json.dumps(
             {
                 "target_url": "https://example.com",
-                "summary": "Concise summary of tailored QA strategy",
-                "scenarios": [
+                "summary": "Concise summary of high-level QA goals for this site",
+                "goals": [
                     {
-                        "scenario_id": "SCN-001",
-                        "title": "Descriptive site-specific scenario title",
-                        "category": "smoke",
+                        "goal_id": "GOAL-01",
+                        "title": "Navigate all primary sections",
+                        "objective": "Direction only: explore top navigation links and verify each section renders visibly.",
+                        "category": "navigation",
                         "priority": "critical | high | medium | low",
-                        "description": "What this scenario validates on this exact site",
-                        "preconditions": ["Site is reachable"],
-                        "steps": [
-                            {
-                                "step_number": 1,
-                                "action": "navigate | click | fill | wait | assert_visible | assert_url",
-                                "description": "Human-readable intent",
-                                "target_hint": "#exact-selector-from-dom-or-url",
-                                "input_value": None,
-                                "expected_outcome": "Expected observable result",
-                            }
-                        ],
-                        "expected_result": "Final acceptance condition",
+                        "success_criteria": "All discovered navigation sections become visible without errors.",
                     }
                 ],
+            },
+            indent=2,
+        )
+    if name == "NextActionDecision":
+        return json.dumps(
+            {
+                "thought": "Brief reasoning based on live visible elements and recent steps",
+                "decision": "act | goal_met | goal_failed",
+                "action_type": "click | fill | press | scroll | select | wait_for_visible | assert_visible | assert_url | none",
+                "locator_strategy": "role | label | text | placeholder | testid",
+                "role": "button | link | textbox | tab | checkbox | combobox",
+                "name": "Exact accessible name, label, or text from visible elements list",
+                "value": "Input text for fill/select/scroll, or null",
+                "description": "Concise human description of this single action",
+                "completion_reason": "Required when decision is goal_met or goal_failed",
             },
             indent=2,
         )
@@ -390,27 +408,10 @@ def _build_compact_schema_hint(schema: type[BaseModel]) -> str:
                         "behavior_profile": "methodical",
                         "goals": ["Primary goal"],
                         "synthetic_data": {"email": "qa.synthetic@example.com"},
-                        "target_scenarios": ["SCN-001"],
-                        "risk_focus": "Key edge case or failure mode",
+                        "target_scenarios": ["GOAL-01"],
+                        "risk_focus": "Specific edge case focus",
                     }
                 ],
-            },
-            indent=2,
-        )
-    if name == "_BrowserActionPlan":
-        return json.dumps(
-            {
-                "actions": [
-                    {
-                        "step_number": 1,
-                        "action_type": "goto | click | fill | wait_for_selector | assert_visible | assert_url",
-                        "selector": "#css-or-aria-selector-or-null",
-                        "fallback_selectors": [],
-                        "value": "URL or text input or null",
-                        "description": "Human-readable action intent",
-                        "timeout_ms": 5000,
-                    }
-                ]
             },
             indent=2,
         )
@@ -418,23 +419,23 @@ def _build_compact_schema_hint(schema: type[BaseModel]) -> str:
         return json.dumps(
             {
                 "failure_id": "FAIL-001",
-                "category": "SELECTOR_DRIFT | BACKEND_API_ERROR | NETWORK_TIMEOUT | ASSERTION_FAILURE | CONSOLE_EXCEPTION",
+                "category": "NAVIGATION_MISSING | OVERLAY_BLOCKING | SELECTOR_DRIFT | BACKEND_API_ERROR | NETWORK_TIMEOUT | ASSERTION_FAILURE | CONSOLE_EXCEPTION",
                 "severity": "critical | high | medium | low",
                 "confidence": 0.9,
                 "root_cause_summary": "Concise root cause",
                 "verdict": "Short verdict",
-                "needs_healing": True,
+                "needs_healing": False,
                 "recommended_next_agent": "healing_agent | human_review | retry_verification",
-                "evidence_highlights": ["Supporting log or DOM clue"],
+                "evidence_highlights": ["Supporting clue"],
             },
             indent=2,
         )
     if name == "HealingSuggestion":
         framework_patch = {
             "framework": "playwright | cypress | selenium",
-            "healed_selector": "Resilient selector",
-            "code_snippet": "Framework code snippet",
-            "explanation": "Why this selector works",
+            "healed_selector": "Resilient accessible locator",
+            "code_snippet": "Wait for blocking overlay hidden if present, then use getByRole/getByLabel/getByText",
+            "explanation": "Why this locator works and never silently skips blockers",
         }
         return json.dumps(
             {
@@ -443,7 +444,7 @@ def _build_compact_schema_hint(schema: type[BaseModel]) -> str:
                 "primary_healed_locator": "getByRole('button', { name: 'Submit' })",
                 "locator_strategy": "aria_role",
                 "confidence": 0.9,
-                "rationale": "Why this locator resists DOM drift",
+                "rationale": "Why this accessible locator resists DOM drift",
                 "playwright": {**framework_patch, "framework": "playwright"},
                 "cypress": {**framework_patch, "framework": "cypress"},
                 "selenium": {**framework_patch, "framework": "selenium"},
@@ -466,18 +467,6 @@ def _normalize_priority(raw_val: Any, default: str = "medium") -> str:
     if val in ("p3", "p4", "minor", "trivial", "lowest", "sev4", "s4"):
         return "low"
     return default
-
-
-def _to_positive_int(raw_val: Any, default: int, minimum: int = 1) -> int:
-    if isinstance(raw_val, bool):
-        return max(minimum, default)
-    if isinstance(raw_val, (int, float)):
-        return max(minimum, int(raw_val))
-    if isinstance(raw_val, str):
-        digits = re.findall(r"-?\d+", raw_val)
-        if digits:
-            return max(minimum, int(digits[0]))
-    return max(minimum, default)
 
 
 def _to_str_list(raw_val: Any) -> list[str]:
@@ -512,156 +501,177 @@ def _unwrap_payload_dict(parsed: Any, wrapper_keys: tuple[str, ...]) -> dict[str
     return current
 
 
+def _strip_has_text_css(raw_name: str, raw_role: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
+    """Convert accidental ':has-text("Foo")' output into pure accessible name + strategy."""
+    m = re.match(r"^(?:([a-zA-Z0-9_-]+):has-text|:has-text)\(\s*['\"]([^'\"]+)['\"]\s*\)$", raw_name.strip())
+    if not m:
+        return raw_name, raw_role, None
+    tag = (m.group(1) or "").lower()
+    txt = m.group(2).strip()
+    if tag in ("button", "a") and not raw_role:
+        return txt, ("link" if tag == "a" else "button"), "role"
+    return txt, raw_role, ("role" if raw_role else "text")
+
+
 def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
-    """Normalize minor free-model JSON formatting variations before strict Pydantic validation."""
+    """Normalize minor free-model JSON variations before Pydantic validation."""
     name = getattr(schema, "__name__", "")
 
     if name == "TestPlanResult":
         if isinstance(parsed, list):
-            data: dict[str, Any] = {"scenarios": parsed}
+            data: dict[str, Any] = {"goals": parsed}
         elif isinstance(parsed, dict):
-            data = _unwrap_payload_dict(
-                parsed,
-                ("test_plan", "plan", "testPlan", "result", "data", "output", "response"),
-            )
-            if "scenarios" not in data:
-                for alt_key in ("test_scenarios", "testScenarios", "test_cases", "testCases", "cases", "tests"):
+            data = _unwrap_payload_dict(parsed, ("test_plan", "plan", "testPlan", "result", "data", "output", "response"))
+            if "goals" not in data:
+                for alt_key in ("test_goals", "objectives", "scenarios", "test_scenarios", "cases"):
                     if alt_key in data:
-                        data["scenarios"] = data[alt_key]
+                        data["goals"] = data[alt_key]
                         break
                 else:
-                    if isinstance(parsed.get("scenarios"), list):
-                        data["scenarios"] = parsed["scenarios"]
-                    elif "steps" in data and ("title" in data or "name" in data):
-                        data = {"scenarios": [data]}
+                    if isinstance(parsed.get("goals"), list):
+                        data["goals"] = parsed["goals"]
+                    elif isinstance(parsed.get("scenarios"), list):
+                        data["goals"] = parsed["scenarios"]
         else:
             raise ValueError("TestPlanResult payload must be a JSON object or array.")
 
-        raw_scenarios = data.get("scenarios")
-        if not isinstance(raw_scenarios, list) or not raw_scenarios:
-            raise ValueError("LLM output did not include any test scenarios.")
+        raw_goals = data.get("goals")
+        if not isinstance(raw_goals, list) or not raw_goals:
+            raise ValueError("LLM output did not include any test goals.")
 
-        norm_scenarios: list[dict[str, Any]] = []
-        for idx, raw_sc in enumerate(raw_scenarios, start=1):
-            if isinstance(raw_sc, str):
-                sc: dict[str, Any] = {"title": raw_sc}
-            elif isinstance(raw_sc, dict):
-                sc = dict(raw_sc)
-            else:
-                continue
-
-            title = str(sc.get("title") or sc.get("name") or sc.get("scenario_name") or f"Scenario {idx}").strip()
-            raw_steps = sc.get("steps") or sc.get("actions") or []
-            if isinstance(raw_steps, dict):
-                raw_steps = [raw_steps]
-            elif isinstance(raw_steps, str):
-                raw_steps = [raw_steps]
-            elif not isinstance(raw_steps, list):
-                raw_steps = []
-
-            norm_steps: list[dict[str, Any]] = []
-            for s_idx, raw_st in enumerate(raw_steps, start=1):
-                if isinstance(raw_st, str):
-                    st_text = raw_st.strip()
-                    if not st_text:
-                        continue
-                    norm_steps.append(
-                        {
-                            "step_number": s_idx,
-                            "action": "assert_visible",
-                            "description": st_text,
-                            "target_hint": None,
-                            "input_value": None,
-                            "expected_outcome": "",
-                        }
-                    )
+        norm_goals: list[dict[str, Any]] = []
+        for idx, raw_g in enumerate(raw_goals[:6], start=1):
+            if isinstance(raw_g, str):
+                g_text = raw_g.strip()
+                if not g_text:
                     continue
-                if not isinstance(raw_st, dict):
-                    continue
-                action = (
-                    str(
-                        raw_st.get("action")
-                        or raw_st.get("action_type")
-                        or raw_st.get("type")
-                        or raw_st.get("verb")
-                        or "click"
-                    )
-                    .strip()
-                    .lower()
-                    or "click"
-                )
-                raw_target = (
-                    raw_st.get("target_hint")
-                    or raw_st.get("selector")
-                    or raw_st.get("locator")
-                    or raw_st.get("target")
-                    or raw_st.get("element")
-                )
-                target_hint = str(raw_target).strip() if raw_target is not None and str(raw_target).strip() else None
-                raw_input = (
-                    raw_st.get("input_value")
-                    if raw_st.get("input_value") is not None
-                    else (raw_st.get("value") if raw_st.get("value") is not None else raw_st.get("input"))
-                )
-                input_value = str(raw_input) if raw_input is not None else None
-                desc = str(
-                    raw_st.get("description")
-                    or raw_st.get("intent")
-                    or raw_st.get("instruction")
-                    or raw_st.get("name")
-                    or f"{action} {target_hint or ''}".strip()
-                ).strip() or f"Step {s_idx}"
-                raw_outcome = (
-                    raw_st.get("expected_outcome")
-                    or raw_st.get("expected_result")
-                    or raw_st.get("expected")
-                    or ""
-                )
-                norm_steps.append(
+                norm_goals.append(
                     {
-                        "step_number": _to_positive_int(
-                            raw_st.get("step_number") or raw_st.get("step") or raw_st.get("order") or raw_st.get("index"),
-                            default=s_idx,
-                        ),
-                        "action": action,
-                        "description": desc,
-                        "target_hint": target_hint,
-                        "input_value": input_value,
-                        "expected_outcome": str(raw_outcome).strip(),
+                        "goal_id": f"GOAL-{idx:02d}",
+                        "title": g_text[:72],
+                        "objective": g_text,
+                        "category": "e2e",
+                        "priority": "high" if idx == 1 else "medium",
+                        "success_criteria": f"{g_text} succeeds without errors.",
                     }
                 )
-
-            norm_scenarios.append(
+                continue
+            if not isinstance(raw_g, dict):
+                continue
+            title = str(raw_g.get("title") or raw_g.get("name") or raw_g.get("goal") or f"Goal {idx}").strip()
+            objective = str(raw_g.get("objective") or raw_g.get("description") or raw_g.get("goal") or title).strip()
+            norm_goals.append(
                 {
-                    "scenario_id": str(sc.get("scenario_id") or sc.get("id") or f"SCN-{idx:03d}").strip() or f"SCN-{idx:03d}",
+                    "goal_id": str(raw_g.get("goal_id") or raw_g.get("scenario_id") or raw_g.get("id") or f"GOAL-{idx:02d}").strip()
+                    or f"GOAL-{idx:02d}",
                     "title": title,
-                    "category": str(sc.get("category") or sc.get("type") or "e2e").strip() or "e2e",
-                    "priority": _normalize_priority(sc.get("priority"), default="high" if idx == 1 else "medium"),
-                    "description": str(sc.get("description") or sc.get("objective") or sc.get("scope") or title).strip() or title,
-                    "preconditions": _to_str_list(sc.get("preconditions")),
-                    "steps": norm_steps,
-                    "expected_result": str(
-                        sc.get("expected_result")
-                        or sc.get("expected_outcome")
-                        or sc.get("acceptance_criteria")
-                        or sc.get("expected")
-                        or "Scenario completes without console or navigation errors."
+                    "objective": objective,
+                    "category": str(raw_g.get("category") or "e2e").strip() or "e2e",
+                    "priority": _normalize_priority(raw_g.get("priority"), default="high" if idx == 1 else "medium"),
+                    "success_criteria": str(
+                        raw_g.get("success_criteria")
+                        or raw_g.get("expected_result")
+                        or raw_g.get("expected_outcome")
+                        or f"Goal '{title}' verified without runtime or overlay errors."
                     ).strip(),
                 }
             )
 
-        if not norm_scenarios:
-            raise ValueError("LLM output did not contain any valid test scenarios.")
+        if not norm_goals:
+            raise ValueError("LLM output did not contain any valid test goals.")
 
-        summary = str(data.get("summary") or "").strip()
-        if not summary:
-            summary = "Tailored test plan covering: " + ", ".join(s["title"] for s in norm_scenarios[:4])
-
+        summary = str(data.get("summary") or "").strip() or (
+            "Goal-driven QA plan: " + ", ".join(g["title"] for g in norm_goals[:4])
+        )
         return {
             "target_url": str(data.get("target_url") or data.get("url") or "").strip(),
             "summary": summary,
-            "scenarios": norm_scenarios,
+            "goals": norm_goals,
+            "scenarios": [],
             "generated_by": str(data.get("generated_by") or "langchain"),
+        }
+
+    if name == "NextActionDecision":
+        if not isinstance(parsed, dict):
+            raise ValueError("NextActionDecision payload must be a JSON object.")
+        data = _unwrap_payload_dict(parsed, ("decision_result", "next_action", "action_decision", "result", "data", "output"))
+
+        raw_dec = str(data.get("decision") or data.get("status") or "act").strip().lower()
+        raw_act = str(data.get("action_type") or data.get("action") or data.get("type") or "click").strip().lower()
+
+        if raw_dec in ("goal_met", "done", "complete", "completed", "passed", "pass", "success") or raw_act == "goal_met":
+            decision = "goal_met"
+        elif raw_dec in ("goal_failed", "failed", "fail", "stuck", "impossible", "blocked") or raw_act == "goal_failed":
+            decision = "goal_failed"
+        else:
+            decision = "act"
+
+        act_map = {
+            "click": "click",
+            "press_button": "click",
+            "tap": "click",
+            "submit": "click",
+            "fill": "fill",
+            "type": "fill",
+            "input": "fill",
+            "enter_text": "fill",
+            "press": "press",
+            "key": "press",
+            "scroll": "scroll",
+            "scroll_down": "scroll",
+            "scroll_up": "scroll",
+            "select": "select",
+            "wait_for_visible": "wait_for_visible",
+            "wait_for_selector": "wait_for_visible",
+            "wait": "wait_for_visible",
+            "assert_visible": "assert_visible",
+            "verify": "assert_visible",
+            "check": "assert_visible",
+            "assert_url": "assert_url",
+            "none": "none",
+        }
+        action_type = "none" if decision != "act" else act_map.get(raw_act, "assert_visible")
+
+        raw_strat = str(data.get("locator_strategy") or data.get("strategy") or "").strip().lower()
+        strat_map = {
+            "role": "role",
+            "aria": "role",
+            "getbyrole": "role",
+            "label": "label",
+            "getbylabel": "label",
+            "text": "text",
+            "getbytext": "text",
+            "placeholder": "placeholder",
+            "getbyplaceholder": "placeholder",
+            "testid": "testid",
+            "test_id": "testid",
+            "getbytestid": "testid",
+        }
+        role = str(data.get("role") or "").strip().lower() or None
+        raw_name = data.get("name") if data.get("name") is not None else data.get("selector")
+        clean_name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else None
+        inferred_strat: Optional[str] = None
+        if clean_name:
+            clean_name, role, inferred_strat = _strip_has_text_css(clean_name, role)
+
+        locator_strategy = strat_map.get(raw_strat) or inferred_strat or ("role" if role else ("text" if clean_name else None))
+        raw_val = data.get("value") if data.get("value") is not None else data.get("input_value")
+        val_str = str(raw_val) if raw_val is not None else None
+        if raw_act == "scroll_up" and not val_str:
+            val_str = "-600"
+
+        return {
+            "thought": str(data.get("thought") or data.get("reasoning") or "").strip(),
+            "decision": decision,
+            "action_type": action_type,
+            "locator_strategy": locator_strategy,
+            "role": role,
+            "name": clean_name,
+            "value": val_str,
+            "description": str(
+                data.get("description") or data.get("intent") or f"{action_type} {clean_name or val_str or ''}".strip()
+            ).strip(),
+            "completion_reason": str(data.get("completion_reason") or data.get("reason") or "").strip(),
         }
 
     if name == "PersonaSuiteResult":
@@ -674,9 +684,6 @@ def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
                     if alt_key in data:
                         data["personas"] = data[alt_key]
                         break
-                else:
-                    if isinstance(parsed.get("personas"), list):
-                        data["personas"] = parsed["personas"]
         else:
             raise ValueError("PersonaSuiteResult payload must be a JSON object or array.")
 
@@ -710,116 +717,24 @@ def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
             "generated_by": str(data.get("generated_by") or "langchain"),
         }
 
-    if name == "_BrowserActionPlan":
-        if isinstance(parsed, list):
-            data = {"actions": parsed}
-        elif isinstance(parsed, dict):
-            data = _unwrap_payload_dict(parsed, ("action_plan", "browser_action_plan", "plan", "result", "data", "output", "response"))
-            if "actions" not in data:
-                for alt_key in ("steps", "browser_actions"):
-                    if alt_key in data:
-                        data["actions"] = data[alt_key]
-                        break
-                else:
-                    if isinstance(parsed.get("actions"), list):
-                        data["actions"] = parsed["actions"]
-        else:
-            raise ValueError("_BrowserActionPlan payload must be a JSON object or array.")
-
-        raw_actions = data.get("actions")
-        if not isinstance(raw_actions, list) or not raw_actions:
-            raise ValueError("LLM output did not include any browser actions.")
-
-        action_map = {
-            "goto": "goto",
-            "navigate": "goto",
-            "open": "goto",
-            "visit": "goto",
-            "go": "goto",
-            "load": "goto",
-            "click": "click",
-            "press": "click",
-            "tap": "click",
-            "submit": "click",
-            "hover": "click",
-            "toggle": "click",
-            "fill": "fill",
-            "type": "fill",
-            "input": "fill",
-            "enter": "fill",
-            "select": "fill",
-            "wait_for_selector": "wait_for_selector",
-            "wait": "wait_for_selector",
-            "wait_for": "wait_for_selector",
-            "sleep": "wait_for_selector",
-            "assert_url": "assert_url",
-            "check_url": "assert_url",
-            "verify_url": "assert_url",
-            "url": "assert_url",
-            "assert_visible": "assert_visible",
-            "verify": "assert_visible",
-            "check": "assert_visible",
-            "assert": "assert_visible",
-            "expect_visible": "assert_visible",
-            "inspect": "assert_visible",
-        }
-
-        norm_actions: list[dict[str, Any]] = []
-        for idx, raw_act in enumerate(raw_actions, start=1):
-            if not isinstance(raw_act, dict):
-                continue
-            raw_type = (
-                str(
-                    raw_act.get("action_type")
-                    or raw_act.get("action")
-                    or raw_act.get("type")
-                    or raw_act.get("verb")
-                    or "assert_visible"
-                )
-                .strip()
-                .lower()
-            )
-            mapped_type = action_map.get(raw_type, "assert_visible")
-            raw_sel = (
-                raw_act.get("selector")
-                or raw_act.get("target_hint")
-                or raw_act.get("locator")
-                or raw_act.get("target")
-                or raw_act.get("element")
-            )
-            selector = str(raw_sel).strip() if raw_sel is not None and str(raw_sel).strip() else None
-            raw_val = (
-                raw_act.get("value")
-                if raw_act.get("value") is not None
-                else (raw_act.get("input_value") if raw_act.get("input_value") is not None else raw_act.get("input"))
-            )
-            val_str = str(raw_val) if raw_val is not None else None
-            norm_actions.append(
-                {
-                    "step_number": _to_positive_int(
-                        raw_act.get("step_number") or raw_act.get("step") or raw_act.get("order") or raw_act.get("index"),
-                        default=idx,
-                    ),
-                    "action_type": mapped_type,
-                    "selector": selector,
-                    "fallback_selectors": _to_str_list(raw_act.get("fallback_selectors")),
-                    "value": val_str,
-                    "description": str(
-                        raw_act.get("description") or raw_act.get("intent") or f"{mapped_type} {selector or val_str or ''}".strip()
-                    ).strip(),
-                    "timeout_ms": _to_positive_int(raw_act.get("timeout_ms"), default=5000, minimum=100),
-                }
-            )
-        if not norm_actions:
-            raise ValueError("LLM output did not contain any valid browser actions.")
-        return {"actions": norm_actions}
-
     if name == "TriageDiagnosis" and isinstance(parsed, dict):
         data = _unwrap_payload_dict(parsed, ("diagnosis", "triage_diagnosis", "triage", "result", "data", "output"))
         raw_cat = str(data.get("category") or "ASSERTION_FAILURE").strip().upper().replace(" ", "_")
-        allowed_cats = {"SELECTOR_DRIFT", "BACKEND_API_ERROR", "NETWORK_TIMEOUT", "ASSERTION_FAILURE", "CONSOLE_EXCEPTION"}
+        allowed_cats = {
+            "NAVIGATION_MISSING",
+            "OVERLAY_BLOCKING",
+            "SELECTOR_DRIFT",
+            "BACKEND_API_ERROR",
+            "NETWORK_TIMEOUT",
+            "ASSERTION_FAILURE",
+            "CONSOLE_EXCEPTION",
+        }
         if raw_cat not in allowed_cats:
-            if "SELECTOR" in raw_cat or "LOCATOR" in raw_cat:
+            if "NAVIGATION" in raw_cat or "BLANK" in raw_cat:
+                raw_cat = "NAVIGATION_MISSING"
+            elif "OVERLAY" in raw_cat or "MODAL" in raw_cat:
+                raw_cat = "OVERLAY_BLOCKING"
+            elif "SELECTOR" in raw_cat or "LOCATOR" in raw_cat:
                 raw_cat = "SELECTOR_DRIFT"
             elif "TIMEOUT" in raw_cat or "NETWORK" in raw_cat:
                 raw_cat = "NETWORK_TIMEOUT"
@@ -851,7 +766,7 @@ def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
 
     if name == "HealingSuggestion" and isinstance(parsed, dict):
         data = _unwrap_payload_dict(parsed, ("healing_suggestion", "healing", "suggestion", "result", "data", "output"))
-        primary = str(data.get("primary_healed_locator") or data.get("healed_selector") or "button").strip()
+        primary = str(data.get("primary_healed_locator") or data.get("healed_selector") or "getByRole('button')").strip()
         try:
             conf = float(data.get("confidence", 0.8))
         except Exception:
@@ -880,22 +795,23 @@ def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
             "locator_strategy": str(data.get("locator_strategy") or "aria_role").strip(),
             "confidence": max(0.0, min(1.0, conf)),
             "rationale": str(data.get("rationale") or "Resilient accessible selector synthesized from DOM context.").strip(),
-            "playwright": _coerce_fw("playwright", f"await page.locator({json.dumps(primary)}).click();"),
-            "cypress": _coerce_fw("cypress", f"cy.get({json.dumps(primary)}).click();"),
-            "selenium": _coerce_fw("selenium", f"driver.find_element(By.CSS_SELECTOR, {json.dumps(primary)}).click()"),
+            "playwright": _coerce_fw("playwright", f"await page.{primary}.click();"),
+            "cypress": _coerce_fw("cypress", f"cy.findByRole('button').click();"),
+            "selenium": _coerce_fw("selenium", "driver.find_element(By.CSS_SELECTOR, 'button').click()"),
         }
 
     return parsed
 
 
 class _OpenRouterChatModel(BaseChatModel):
-    """Lightweight httpx-powered LangChain chat model for OpenRouter (supporting :free models)."""
+    """httpx-powered LangChain chat model for OpenRouter with timeout & transient retry support."""
 
     model_name: str
     api_key: str
     temperature: float = 0.2
     base_url: str = OPENROUTER_BASE_URL
-    timeout_s: float = 25.0
+    timeout_s: float = 35.0
+    max_attempts: int = 2
 
     @property
     def _llm_type(self) -> str:
@@ -918,37 +834,61 @@ class _OpenRouterChatModel(BaseChatModel):
     def _call_api(self, messages: list[dict[str, str]]) -> str:
         import httpx
 
-        resp = httpx.post(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "http://localhost:8000",
-                "X-Title": "AgentSwarm QA",
-            },
-            json={
-                "model": self.model_name,
-                "messages": messages,
-                "temperature": self.temperature,
-            },
-            timeout=self.timeout_s,
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError(f"OpenRouter HTTP {resp.status_code} for '{self.model_name}': {resp.text[:400]}")
-        data = resp.json()
-        if "error" in data and data["error"]:
-            raise RuntimeError(f"OpenRouter error for '{self.model_name}': {data['error']}")
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"OpenRouter returned empty choices for '{self.model_name}': {str(data)[:300]}")
-        msg_obj = choices[0].get("message") or {}
-        content = msg_obj.get("content") or ""
-        if isinstance(content, list):
-            content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
-        return str(content)
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_attempts):
+            try:
+                resp = httpx.post(
+                    f"{self.base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:8000",
+                        "X-Title": "AgentSwarm QA",
+                    },
+                    json={
+                        "model": self.model_name,
+                        "messages": messages,
+                        "temperature": self.temperature,
+                        "max_tokens": 2048,
+                    },
+                    timeout=self.timeout_s,
+                )
+                if resp.status_code in (429, 502, 503, 504) and attempt + 1 < self.max_attempts:
+                    time.sleep(1.5)
+                    continue
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"OpenRouter HTTP {resp.status_code} for '{self.model_name}': {resp.text[:400]}")
+                data = resp.json()
+                if "error" in data and data["error"]:
+                    raise RuntimeError(f"OpenRouter error for '{self.model_name}': {data['error']}")
+                choices = data.get("choices") or []
+                if not choices:
+                    raise RuntimeError(f"OpenRouter returned empty choices for '{self.model_name}': {str(data)[:300]}")
+                msg_obj = choices[0].get("message") or {}
+                content = msg_obj.get("content") or ""
+                if isinstance(content, list):
+                    content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+                text_out = str(content).strip()
+                if not text_out:
+                    reasoning = str(msg_obj.get("reasoning") or msg_obj.get("reasoning_content") or "").strip()
+                    if reasoning and ("{" in reasoning or "[" in reasoning):
+                        return reasoning
+                    if attempt + 1 < self.max_attempts:
+                        time.sleep(1.5)
+                        continue
+                    finish_reason = choices[0].get("finish_reason")
+                    raise RuntimeError(
+                        f"OpenRouter returned empty content for '{self.model_name}' (finish_reason={finish_reason})"
+                    )
+                return str(content)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+                if attempt + 1 < self.max_attempts:
+                    time.sleep(1.5)
+                    continue
+                raise RuntimeError(f"OpenRouter timeout/transport error for '{self.model_name}': {exc}") from exc
+
+        raise RuntimeError(f"OpenRouter request failed for '{self.model_name}': {last_exc}")
 
     def _generate(
         self,
@@ -957,8 +897,7 @@ class _OpenRouterChatModel(BaseChatModel):
         run_manager: Optional[Any] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        raw_messages = self._convert_messages(messages)
-        text = self._call_api(raw_messages)
+        text = self._call_api(self._convert_messages(messages))
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
@@ -976,7 +915,7 @@ class _OpenRouterChatModel(BaseChatModel):
             instruction = (
                 "\n\nIMPORTANT OUTPUT REQUIREMENT:\n"
                 "Return ONLY a single valid JSON object (no markdown fences, no commentary, no extra text) "
-                "matching this exact JSON structure:\n"
+                "matching this JSON structure:\n"
                 f"{schema_hint}"
             )
             if api_msgs and api_msgs[-1]["role"] == "user":
@@ -998,21 +937,11 @@ def resolve_chat_model(
     api_key: Optional[str] = None,
     temperature: float = 0.2,
 ) -> Optional[BaseChatModel]:
-    """
-    Create a model-agnostic LangChain BaseChatModel from explicit arguments or environment variables.
-
-    Supports:
-    - openrouter (OPENROUTER_API_KEY via built-in _OpenRouterChatModel supporting ':free' models)
-    - google_genai (GOOGLE_API_KEY or GEMINI_API_KEY)
-    - openai (OPENAI_API_KEY)
-    - deterministic (returns None immediately for offline rule-based execution)
-    Returns None if no valid API key is configured so agents can fall back cleanly.
-    """
+    """Create a LangChain BaseChatModel from explicit arguments or backend/.env."""
     if _ENV_PATH.exists():
         load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
     parsed_provider, parsed_model = parse_provider_and_model(provider, model_name)
-
     if parsed_provider in ("deterministic", "local", "offline") or parsed_model == "deterministic-fallback":
         return None
 
@@ -1042,18 +971,11 @@ def resolve_chat_model(
             if not resolved_key:
                 return None
             resolved_model = (
-                parsed_model
-                or os.getenv("LLM_MODEL")
-                or os.getenv("OPENROUTER_MODEL")
-                or "openrouter/free"
+                parsed_model or os.getenv("LLM_MODEL") or os.getenv("OPENROUTER_MODEL") or "openrouter/free"
             ).strip()
             if resolved_model in _UNAVAILABLE_MODELS and _WORKING_OPENROUTER_MODEL:
                 resolved_model = _WORKING_OPENROUTER_MODEL
-            return _OpenRouterChatModel(
-                model_name=resolved_model,
-                api_key=resolved_key,
-                temperature=temperature,
-            )
+            return _OpenRouterChatModel(model_name=resolved_model, api_key=resolved_key, temperature=temperature)
 
         if raw_provider in ("google", "gemini", "google_genai"):
             resolved_key = (explicit_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
@@ -1068,7 +990,7 @@ def resolve_chat_model(
                 api_key=resolved_key,
                 temperature=temperature,
                 max_retries=1,
-                timeout=12,
+                timeout=18,
             )
 
         if raw_provider == "openai":
@@ -1082,10 +1004,9 @@ def resolve_chat_model(
                 api_key=resolved_key,
                 temperature=temperature,
                 max_retries=1,
-                timeout=12,
+                timeout=18,
             )
 
-        # Generic provider pass-through supported by LangChain init_chat_model
         resolved_model = (parsed_model or os.getenv("LLM_MODEL") or "").strip()
         if not resolved_model:
             return None
@@ -1093,9 +1014,6 @@ def resolve_chat_model(
         if explicit_key:
             kwargs["api_key"] = explicit_key
         return init_chat_model(resolved_model, **kwargs)
-    except ImportError as exc:
-        logger.warning("[AgentSwarm LLM] Missing LangChain provider package for '%s': %s", raw_provider, exc)
-        return None
     except Exception as exc:
         logger.warning("[AgentSwarm LLM] Failed to initialize provider '%s': %s", raw_provider, exc)
         return None
@@ -1113,11 +1031,7 @@ def invoke_with_model_fallback(
     temperature: float = 0.2,
     allow_fallback: bool = True,
 ) -> tuple[Any, Optional[str]]:
-    """
-    Invoke a LangChain structured-output chain and recover rapidly from 404/503/429/timeout/provider errors.
-
-    Returns `(validated_result, resolved_model_name)`.
-    """
+    """Invoke a structured-output chain and recover cleanly across 404/503/429/timeout/JSON errors."""
     global _WORKING_GOOGLE_MODEL, _WORKING_OPENROUTER_MODEL
     if primary_chain is None:
         raise RuntimeError("LangChain structured output chain is not configured.")
@@ -1143,91 +1057,49 @@ def invoke_with_model_fallback(
     ).strip()
 
     if eff_provider == "openrouter" and failed_model in _UNAVAILABLE_MODELS and _WORKING_OPENROUTER_MODEL and _WORKING_OPENROUTER_MODEL not in _UNAVAILABLE_MODELS:
-        alt_llm = resolve_chat_model(
-            model_name=_WORKING_OPENROUTER_MODEL,
-            provider="openrouter",
-            api_key=api_key,
-            temperature=temperature,
-        )
+        alt_llm = resolve_chat_model(model_name=_WORKING_OPENROUTER_MODEL, provider="openrouter", api_key=api_key, temperature=temperature)
         if alt_llm:
             primary_chain = prompt | alt_llm.with_structured_output(schema)
             failed_model = _WORKING_OPENROUTER_MODEL
     elif eff_provider == "google_genai" and failed_model in _UNAVAILABLE_MODELS and _WORKING_GOOGLE_MODEL and _WORKING_GOOGLE_MODEL not in _UNAVAILABLE_MODELS:
-        alt_llm = resolve_chat_model(
-            model_name=_WORKING_GOOGLE_MODEL,
-            provider="google_genai",
-            api_key=api_key,
-            temperature=temperature,
-        )
+        alt_llm = resolve_chat_model(model_name=_WORKING_GOOGLE_MODEL, provider="google_genai", api_key=api_key, temperature=temperature)
         if alt_llm:
             primary_chain = prompt | alt_llm.with_structured_output(schema)
             failed_model = _WORKING_GOOGLE_MODEL
 
     try:
-        res = primary_chain.invoke(prompt_input)
-        return res, failed_model
+        return primary_chain.invoke(prompt_input), failed_model
     except Exception as exc:
         err_str = str(exc)
         err_low = err_str.lower()
         is_recoverable = isinstance(exc, (ValueError, ValidationError)) or any(
             tok in err_low
             for tok in (
-                "404",
-                "not_found",
-                "no longer available",
-                "is not found",
-                "no endpoints found",
-                "provider returned error",
-                "500",
-                "502",
-                "503",
-                "504",
-                "bad gateway",
-                "unavailable",
-                "429",
-                "resource_exhausted",
-                "rate limit",
-                "overloaded",
-                "high demand",
-                "timed out",
-                "timeout",
-                "readtimeout",
-                "connect",
-                "remoteprotocolerror",
-                "could not extract valid json",
-                "validation error",
-                "field required",
-                "invalid json",
-                "empty choices",
+                "404", "not_found", "no longer available", "is not found", "no endpoints found",
+                "provider returned error", "500", "502", "503", "504", "bad gateway", "unavailable",
+                "429", "resource_exhausted", "rate limit", "overloaded", "high demand",
+                "timed out", "timeout", "readtimeout", "connect", "remoteprotocolerror",
+                "could not extract valid json", "validation error", "field required", "invalid json", "empty choices", "empty content",
             )
         )
         if not allow_fallback or not is_recoverable:
             raise
 
-        is_not_found = any(
-            tok in err_low
-            for tok in ("404", "not_found", "no longer available", "is not found", "no endpoints found")
-        )
+        is_not_found = any(tok in err_low for tok in ("404", "not_found", "no longer available", "is not found", "no endpoints found"))
         if failed_model != "openrouter/free" or is_not_found:
             _UNAVAILABLE_MODELS.add(failed_model)
 
         if eff_provider == "openrouter":
             pool = [
-                "openrouter/free",
+                *_discover_openrouter_free_models(),
                 "google/gemma-3-27b-it:free",
                 "meta-llama/llama-3.3-70b-instruct:free",
                 "deepseek/deepseek-chat-v3-0324:free",
+                "openrouter/free",
             ]
         elif eff_provider == "google_genai":
             suggested = re.findall(r"models/([a-zA-Z0-9._-]+)", err_str)
-            pool = [
-                *suggested,
-                "gemini-2.0-flash",
-                "gemini-2.5-pro",
-                "gemini-3.8-pro",
-                "gemini-3.8-flash",
-                *_discover_google_models(api_key),
-            ]
+            pool = [*suggested, "gemini-2.0-flash", "gemini-2.5-pro", "gemini-3.8-pro", "gemini-3.8-flash", *_discover_google_models(api_key)]
         else:
             raise
 
@@ -1237,19 +1109,15 @@ def invoke_with_model_fallback(
             if clean and clean != failed_model and clean not in _UNAVAILABLE_MODELS and clean not in candidates:
                 candidates.append(clean)
 
+        tried_models = [failed_model]
         last_exc: Exception = exc
-        for cand in candidates[:4]:
-            alt_llm = resolve_chat_model(
-                model_name=cand,
-                provider=eff_provider,
-                api_key=api_key,
-                temperature=temperature,
-            )
+        for cand in candidates[:5]:
+            alt_llm = resolve_chat_model(model_name=cand, provider=eff_provider, api_key=api_key, temperature=temperature)
             if not alt_llm:
                 continue
+            tried_models.append(cand)
             try:
-                alt_chain = prompt | alt_llm.with_structured_output(schema)
-                res = alt_chain.invoke(prompt_input)
+                res = (prompt | alt_llm.with_structured_output(schema)).invoke(prompt_input)
                 if eff_provider == "google_genai":
                     _WORKING_GOOGLE_MODEL = cand
                 elif eff_provider == "openrouter":
@@ -1257,54 +1125,59 @@ def invoke_with_model_fallback(
                 logger.info("[AgentSwarm LLM] Recovered from '%s' error -> using '%s'", failed_model, cand)
                 return res, cand
             except Exception as cand_exc:
-                cand_err_low = str(cand_exc).lower()
-                cand_not_found = any(
-                    tok in cand_err_low
-                    for tok in ("404", "not_found", "no longer available", "is not found", "no endpoints found")
-                )
-                if cand != "openrouter/free" or cand_not_found:
+                cand_low = str(cand_exc).lower()
+                if cand != "openrouter/free" or any(t in cand_low for t in ("404", "not_found", "no endpoints found")):
                     _UNAVAILABLE_MODELS.add(cand)
                 last_exc = cand_exc
-                continue
-        raise last_exc
+        raise RuntimeError(f"All AI models failed ({', '.join(tried_models)}): {last_exc}") from last_exc
+
+
+class TestGoal(BaseModel):
+    """Directional high-level QA goal generated without pre-written selectors or fixed scripts."""
+
+    goal_id: str = Field(..., description="Unique goal identifier (e.g., GOAL-01)")
+    title: str = Field(..., description="Concise directional goal title")
+    objective: str = Field(..., description="Direction only describing what capability/area to exercise")
+    category: str = Field("e2e", description="Category such as navigation, theme, interactive, form, smoke")
+    priority: Literal["critical", "high", "medium", "low"] = Field("high")
+    success_criteria: str = Field("", description="Observable outcome indicating this goal is satisfied")
 
 
 class TestStepPlan(BaseModel):
-    """Single executable step inside an autonomous QA scenario."""
+    """Lightweight step record model kept for schema compatibility (empty on goal-only plans)."""
 
-    step_number: int = Field(..., ge=1, description="1-based order of the step")
-    action: str = Field(..., description="Browser action verb (navigate, click, fill, wait, assert_visible, assert_url)")
-    description: str = Field(..., description="Human-readable intent of the step")
-    target_hint: Optional[str] = Field(None, description="Suggested selector or accessible role/label hint")
-    input_value: Optional[str] = Field(None, description="Input payload for fill/select actions")
-    expected_outcome: str = Field("", description="Expected observable result after this step")
+    step_number: int = Field(1, ge=1)
+    action: str = "assert_visible"
+    description: str = ""
+    target_hint: Optional[str] = None
+    input_value: Optional[str] = None
+    expected_outcome: str = ""
 
 
 class TestScenario(BaseModel):
-    """Structured end-to-end QA test scenario created by the PlannerAgent."""
+    """Compatibility mirror of TestGoal with empty steps (goals drive live exploration)."""
 
-    scenario_id: str = Field(..., description="Unique scenario identifier (e.g., SCN-001)")
-    title: str = Field(..., description="Concise title of the test scenario")
-    category: str = Field("e2e", description="Category such as smoke, auth, checkout, navigation, edge_case")
-    priority: Literal["critical", "high", "medium", "low"] = Field("high", description="Execution priority")
-    description: str = Field(..., description="Detailed scope of what this scenario validates")
-    preconditions: list[str] = Field(default_factory=list, description="Required setup before running steps")
-    steps: list[TestStepPlan] = Field(default_factory=list, description="Ordered steps in the scenario")
-    expected_result: str = Field(..., description="Final acceptance condition for the scenario")
+    scenario_id: str
+    title: str
+    category: str = "e2e"
+    priority: Literal["critical", "high", "medium", "low"] = "high"
+    description: str
+    preconditions: list[str] = Field(default_factory=list)
+    steps: list[TestStepPlan] = Field(default_factory=list)
+    expected_result: str = ""
 
 
 class TestPlanResult(BaseModel):
-    """Complete multi-scenario test plan for a target web application."""
+    """High-level goal-oriented QA plan for a target web application."""
 
     target_url: str = Field(..., description="Normalized URL of the application under test")
-    summary: str = Field(..., description="High-level summary of the generated test strategy")
-    scenarios: list[TestScenario] = Field(default_factory=list, description="Prioritized test scenarios")
+    summary: str = Field(..., description="High-level summary of the goal-oriented QA strategy")
+    goals: list[TestGoal] = Field(default_factory=list, description="Directional QA goals (no fixed steps)")
+    scenarios: list[TestScenario] = Field(default_factory=list, description="Goal mirror for UI compatibility")
     generated_by: str = Field("langchain", description="Origin engine identifier")
 
 
 class PlannerGraphState(TypedDict, total=False):
-    """LangGraph state contract for PlannerAgent workflow."""
-
     target_url: str
     normalized_url: str
     dom_summary: Optional[str]
@@ -1316,25 +1189,21 @@ class PlannerGraphState(TypedDict, total=False):
 
 class PlannerAgent:
     """
-    Model-agnostic autonomous QA test planning agent powered by LangChain & LangGraph.
+    Autonomous goal-setting QA Planner powered by LangChain & LangGraph.
 
-    Uses `ChatPromptTemplate | llm.with_structured_output(TestPlanResult)` inside a
-    compiled LangGraph `StateGraph` (`prepare_input -> generate_plan -> finalize_plan`).
-    Works with Gemini, OpenAI, OpenRouter, or any injected LangChain BaseChatModel.
+    Outputs directional high-level goals only (no CSS selectors, no scripted steps).
+    NavigatorAgent explores the live DOM step-by-step to satisfy each goal.
     """
 
     SYSTEM_PROMPT = (
-        "You are the Lead QA Planner Agent for AgentSwarm. Inspect the live DOM / Route Summary carefully "
-        "to determine what kind of web application this actually is (for example: portfolio, SaaS product, "
-        "documentation site, blog, e-commerce store, or interactive web app), and autonomously design concise, "
-        "non-destructive end-to-end browser test scenarios tailored specifically to its REAL features and DOM elements.\n\n"
-        "Strict Planning Rules:\n"
-        "1. NEVER invent login/authentication, checkout/cart, or form submission scenarios if no corresponding "
-        "login, cart, or form controls appear in the DOM summary.\n"
-        "2. Use exact selectors or locators shown in the DOM / Route Summary for every step's target_hint.\n"
-        "3. If an entry gate, splash screen, or intro overlay button (such as skip/enter intro) appears in the DOM, "
-        "include dismissing/clicking it BEFORE interacting with underlying navigation links or sections.\n"
-        "4. Give each scenario a specific, meaningful title reflecting the actual website functionality under test."
+        "You are the Lead QA Goal Planner for AgentSwarm. Inspect the live page summary and output "
+        "a concise list of 3 to 4 high-level directional QA goals tailored to this specific website.\n\n"
+        "Strict Rules:\n"
+        "1. Goals are DIRECTION ONLY — do NOT include CSS selectors, locators, or fixed step-by-step scripts.\n"
+        "2. Base goals strictly on capabilities visibly present in the page summary (navigation links/sections, "
+        "theme/mode toggle, tabs/cards/modals, forms/contact inputs, social links, etc.).\n"
+        "3. Do NOT invent login/checkout goals when no login/cart controls exist.\n"
+        "4. Include clear success_criteria for when an autonomous browser agent should consider the goal met."
     )
 
     def __init__(
@@ -1348,7 +1217,6 @@ class PlannerAgent:
         self._model_name = model_name
         self._provider = provider
         self._custom_llm_injected = llm is not None
-        self._last_llm_error: Optional[str] = None
         self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
             model_name=model_name,
             provider=provider,
@@ -1361,13 +1229,9 @@ class PlannerAgent:
                 (
                     "human",
                     "Target URL: {target_url}\n\n"
-                    "Testing Objectives:\n{objectives_text}\n\n"
-                    "DOM / Route Summary:\n{dom_summary}\n\n"
-                    "First identify what this specific application does based on the headings, landmarks, links, "
-                    "buttons, overlays, and inputs in the DOM summary above. Then design 2 to 4 distinct, realistic, "
-                    "non-redundant end-to-end test scenarios tailored specifically to the real interactive elements and "
-                    "sections present on this page (plus any explicit Testing Objectives above). Use exact selectors "
-                    "from the DOM summary as target_hint.",
+                    "Explicit Testing Objectives (include if given):\n{objectives_text}\n\n"
+                    "Post-Preflight Live Page Summary:\n{dom_summary}\n\n"
+                    "Generate 3 to 4 concise high-level QA goals tailored to this site (direction only, zero selectors, zero scripts).",
                 ),
             ]
         )
@@ -1379,13 +1243,9 @@ class PlannerAgent:
         url = (target_url or "").strip()
         if not url:
             return "https://example.com"
-        if not url.startswith(("http://", "https://")):
-            url = f"https://{url}"
-        return url
+        return url if url.startswith(("http://", "https://")) else f"https://{url}"
 
     def _invoke_chain(self, prompt_input: dict[str, str]) -> TestPlanResult:
-        if not self._chain:
-            raise RuntimeError("LangChain structured output chain is not configured.")
         result, resolved_model = invoke_with_model_fallback(
             self._prompt,
             TestPlanResult,
@@ -1399,17 +1259,16 @@ class PlannerAgent:
         )
         if not isinstance(result, TestPlanResult):
             result = TestPlanResult.model_validate(result)
-        if not result.scenarios:
-            raise ValueError("LLM returned zero test scenarios.")
-
+        if not result.goals:
+            raise ValueError("LLM returned zero QA goals.")
         result.generated_by = f"langchain:{resolved_model}" if resolved_model else "langchain"
         return result
 
     def _node_prepare_input(self, state: PlannerGraphState) -> dict[str, Any]:
         normalized_url = self._normalize_url(state.get("target_url", ""))
         objectives = state.get("objectives") or []
-        objectives_text = "\n".join(f"- {obj}" for obj in objectives) if objectives else "- Autonomously test the primary user journeys visible in the live DOM"
-        dom_summary = (state.get("dom_summary") or "No DOM summary provided")[:6000]
+        objectives_text = "\n".join(f"- {obj}" for obj in objectives) if objectives else "- Autonomously test primary features visible on the page"
+        dom_summary = (state.get("dom_summary") or "No live summary provided")[:4500]
         return {
             "normalized_url": normalized_url,
             "prompt_input": {
@@ -1420,41 +1279,55 @@ class PlannerAgent:
         }
 
     def _node_generate_plan(self, state: PlannerGraphState) -> dict[str, Any]:
-        normalized_url = state["normalized_url"]
-        planner_error: Optional[str] = None
-        self._last_llm_error = None
-        if self._chain:
-            try:
-                plan = self._invoke_chain(state["prompt_input"])
-                return {"test_plan": plan, "planner_error": None}
-            except Exception as exc:
-                planner_error = str(exc).strip()[:220]
-                self._last_llm_error = planner_error
-                logger.warning("[PlannerAgent] LangChain invocation failed, using deterministic fallback: %s", exc)
-        else:
-            planner_error = "Deterministic mode selected (no LLM configured)."
-            self._last_llm_error = planner_error
-
-        plan = self._build_fallback_plan(
-            target_url=normalized_url,
-            dom_summary=state.get("dom_summary"),
-            objectives=state.get("objectives"),
-        )
-        return {"test_plan": plan, "planner_error": planner_error}
+        if not self._chain:
+            raise RuntimeError(
+                "No active AI LLM configured. Set OPENROUTER_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY "
+                "to generate a website-specific QA goal plan."
+            )
+        try:
+            plan = self._invoke_chain(state["prompt_input"])
+            return {"test_plan": plan, "planner_error": None}
+        except Exception as exc:
+            logger.error("[PlannerAgent] AI goal planning failed across models: %s", exc)
+            raise RuntimeError(f"AI goal planning failed (no fallback plan generated): {exc}") from exc
 
     @staticmethod
     def _node_finalize_plan(state: PlannerGraphState) -> dict[str, Any]:
         plan = state["test_plan"]
         plan.target_url = state["normalized_url"]
+        if not plan.goals and plan.scenarios:
+            plan.goals = [
+                TestGoal(
+                    goal_id=sc.scenario_id,
+                    title=sc.title,
+                    objective=sc.description,
+                    category=sc.category,
+                    priority=sc.priority,
+                    success_criteria=sc.expected_result,
+                )
+                for sc in plan.scenarios
+            ]
+        # Mirror goals as empty-step scenarios so UI/API schema consumers work cleanly without pre-written scripts
+        plan.scenarios = [
+            TestScenario(
+                scenario_id=g.goal_id,
+                title=g.title,
+                category=g.category,
+                priority=g.priority,
+                description=g.objective,
+                preconditions=["Single continuous browser session ready on target URL"],
+                steps=[],
+                expected_result=g.success_criteria,
+            )
+            for g in plan.goals
+        ]
         return {"test_plan": plan}
 
     def build_graph(self):
-        """Build and compile the internal LangGraph workflow for test planning."""
         builder = StateGraph(PlannerGraphState)
         builder.add_node("prepare_input", self._node_prepare_input)
         builder.add_node("generate_plan", self._node_generate_plan)
         builder.add_node("finalize_plan", self._node_finalize_plan)
-
         builder.add_edge(START, "prepare_input")
         builder.add_edge("prepare_input", "generate_plan")
         builder.add_edge("generate_plan", "finalize_plan")
@@ -1467,7 +1340,7 @@ class PlannerAgent:
         dom_summary: Optional[str] = None,
         objectives: Optional[list[str]] = None,
     ) -> TestPlanResult:
-        """Execute the compiled LangGraph planner workflow to produce a structured TestPlanResult."""
+        """Execute the compiled LangGraph planner workflow to produce a goal-oriented TestPlanResult."""
         result_state = self._graph.invoke(
             {
                 "target_url": target_url,
@@ -1477,209 +1350,7 @@ class PlannerAgent:
         )
         return result_state["test_plan"]
 
-    @staticmethod
-    def _extract_dom_candidates(dom_summary: Optional[str]) -> list[dict[str, str]]:
-        """Extract interactive element hints from BrowserToolkit summary lines or raw HTML."""
-        if not dom_summary:
-            return []
-        candidates: list[dict[str, str]] = []
-        pattern = re.compile(
-            r"^-\s*<([a-z0-9]+)>\s+role=([a-z0-9_-]+)(?:\s+name='([^']*)')?(?:\s+id=#([^\s]+))?\s*->\s*(.+)$",
-            re.I,
-        )
-        for line in dom_summary.splitlines():
-            m = pattern.match(line.strip())
-            if m:
-                candidates.append(
-                    {
-                        "tag": m.group(1).lower(),
-                        "role": m.group(2).lower(),
-                        "name": (m.group(3) or "").strip(),
-                        "id": (m.group(4) or "").strip(),
-                        "locator": m.group(5).strip(),
-                    }
-                )
-        if not candidates and "</" in dom_summary:
-            try:
-                from ..browser.browser_tools import BrowserToolkit
-
-                for el in BrowserToolkit.extract_interactive_elements(dom_summary):
-                    candidates.append(
-                        {
-                            "tag": el.tag,
-                            "role": el.role,
-                            "name": el.accessible_name or el.text or el.placeholder or el.element_id,
-                            "locator": el.recommended_locator or (f"#{el.element_id}" if el.element_id else el.tag),
-                            "id": el.element_id,
-                        }
-                    )
-            except Exception:
-                pass
-        return candidates
-
-    @staticmethod
-    def _extract_headings(dom_summary: Optional[str]) -> list[str]:
-        if not dom_summary:
-            return []
-        for line in dom_summary.splitlines():
-            if line.startswith("Landmarks & Headings:"):
-                raw = line.split(":", 1)[1]
-                headings = []
-                for part in raw.split("|"):
-                    txt = part.split(":", 1)[1].strip() if ":" in part else part.strip()
-                    if txt and txt not in headings:
-                        headings.append(txt)
-                return headings
-        return []
-
-    @classmethod
-    def _build_fallback_plan(
-        cls,
-        target_url: str,
-        dom_summary: Optional[str],
-        objectives: Optional[list[str]],
-    ) -> TestPlanResult:
-        candidates = cls._extract_dom_candidates(dom_summary)
-        headings = cls._extract_headings(dom_summary)
-        site_label = headings[0][:50] if headings else target_url
-
-        buttons = [c for c in candidates if c["role"] == "button" or c["tag"] == "button"]
-        links = [c for c in candidates if c["role"] == "link" or c["tag"] == "a"]
-        inputs = [c for c in candidates if c["role"] in ("textbox", "combobox") or c["tag"] in ("input", "textarea", "select")]
-        intro_btns = [
-            b for b in buttons
-            if any(tok in (b["name"] + " " + b["id"]).lower() for tok in ("skip", "enter", "intro"))
-        ]
-
-        scenarios: list[TestScenario] = []
-
-        # Purely dynamic DOM-driven exploration from real discovered elements (no fixed templates)
-        steps: list[TestStepPlan] = [
-            TestStepPlan(
-                step_number=1,
-                action="navigate",
-                description=f"Open {site_label} ({target_url})",
-                target_hint=target_url,
-                expected_outcome="HTTP 2xx response and page document loads",
-            )
-        ]
-        if intro_btns:
-            ib = intro_btns[0]
-            ib_label = ib["name"] or ib["id"] or "Skip / Enter"
-            steps.append(
-                TestStepPlan(
-                    step_number=len(steps) + 1,
-                    action="click",
-                    description=f"Dismiss intro overlay via '{ib_label[:45]}'",
-                    target_hint=ib["locator"],
-                    expected_outcome="Underlying page content becomes accessible",
-                )
-            )
-
-        steps.append(
-            TestStepPlan(
-                step_number=len(steps) + 1,
-                action="assert_visible",
-                description=f"Verify primary landmarks render visibly on {site_label}",
-                target_hint="main, body, h1",
-                expected_outcome="Primary content renders without layout failure",
-            )
-        )
-
-        # Exercise up to 2 real discovered interactive links/buttons
-        interactive_pool: list[dict[str, str]] = []
-        for lk in links:
-            if lk not in interactive_pool and "skip" not in (lk["name"] + " " + lk["id"]).lower():
-                interactive_pool.append(lk)
-        for btn in buttons:
-            if btn not in intro_btns and btn not in interactive_pool:
-                interactive_pool.append(btn)
-
-        for item in interactive_pool[:2]:
-            label = item["name"] or item["id"] or item["tag"]
-            steps.append(
-                TestStepPlan(
-                    step_number=len(steps) + 1,
-                    action="click",
-                    description=f"Click discovered {item['role'] or item['tag']} '{label[:45]}'",
-                    target_hint=item["locator"],
-                    expected_outcome="Control interacts cleanly without runtime or console errors",
-                )
-            )
-
-        # Only populate real discovered form inputs if inputs actually exist in the DOM
-        for inp in inputs[:2]:
-            inp_label = inp["name"] or inp["id"] or "input"
-            sample_val = (
-                "qa.synthetic@agentswarm.dev"
-                if "email" in inp_label.lower()
-                else ("SyntheticPass!2026" if "pass" in inp_label.lower() else "AgentSwarm QA Test")
-            )
-            steps.append(
-                TestStepPlan(
-                    step_number=len(steps) + 1,
-                    action="fill",
-                    description=f"Fill discovered input '{inp_label[:40]}' with synthetic QA data",
-                    target_hint=inp["locator"],
-                    input_value=sample_val,
-                    expected_outcome=f"Input '{inp_label[:40]}' accepts text cleanly",
-                )
-            )
-
-        scenarios.append(
-            TestScenario(
-                scenario_id="SCN-001",
-                title=f"{site_label}: DOM Exploration",
-                category="smoke",
-                priority="high",
-                description=f"Deterministic DOM-driven fallback exploration of real discovered controls on {site_label}.",
-                preconditions=["Application URL is reachable"],
-                steps=steps,
-                expected_result="Discovered page landmarks and interactive controls function cleanly.",
-            )
-        )
-
-        if objectives:
-            for objective in objectives[:3]:
-                next_idx = len(scenarios) + 1
-                obj_hint = buttons[0]["locator"] if buttons else (links[0]["locator"] if links else "main, body")
-                scenarios.append(
-                    TestScenario(
-                        scenario_id=f"SCN-{next_idx:03d}",
-                        title=f"Objective Check: {objective[:72]}",
-                        category="objective",
-                        priority="high",
-                        description=f"Verify user-requested QA objective: {objective}",
-                        preconditions=["Application loaded"],
-                        steps=[
-                            TestStepPlan(
-                                step_number=1,
-                                action="navigate",
-                                description=f"Ensure application context at {target_url}",
-                                target_hint=target_url,
-                                expected_outcome="Application is active",
-                            ),
-                            TestStepPlan(
-                                step_number=2,
-                                action="assert_visible",
-                                description=f"Validate elements related to objective: {objective}",
-                                target_hint=obj_hint,
-                                expected_outcome="Objective criteria satisfied without errors",
-                            ),
-                        ],
-                        expected_result=f"Objective verified: {objective}",
-                    )
-                )
-
-        return TestPlanResult(
-            target_url=target_url,
-            summary=f"Deterministic DOM-driven fallback generated {len(scenarios)} scenario(s) from discovered controls on {target_url}.",
-            scenarios=scenarios,
-            generated_by="deterministic_fallback",
-        )
-
     def run_node(self, state: dict[str, Any]) -> dict[str, Any]:
-        """LangGraph parent-graph node entrypoint for test planning."""
         target_url = state.get("target_url", "https://example.com")
         dom_summary = state.get("dom_summary") or state.get("dom_snapshot")
         objectives = state.get("objectives")
@@ -1700,5 +1371,4 @@ class PlannerAgent:
 
 
 def planner_node(state: dict[str, Any]) -> dict[str, Any]:
-    """Functional LangGraph node wrapper around PlannerAgent."""
     return PlannerAgent().run_node(state)
