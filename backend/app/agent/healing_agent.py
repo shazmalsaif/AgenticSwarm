@@ -86,6 +86,7 @@ class SwarmGraphState(TypedDict, total=False):
     run_id: Optional[str]
     stream_id: Optional[str]
     test_plan: dict[str, Any]
+    planner_error: Optional[str]
     personas: dict[str, Any]
     navigation_results: list[dict[str, Any]]
     raw_failures: list[dict[str, Any]]
@@ -517,13 +518,23 @@ def build_swarm_graph(
                     scenarios = tp.get("scenarios") or []
                     gen_by = tp.get("generated_by", "agent")
                     titles = ", ".join(s.get("title", "Scenario") for s in scenarios[:4])
+                    planner_err = out.get("planner_error")
                     stream_mgr.update_partial(stream_id, "test_plan", tp)
-                    stream_mgr.push_log(
-                        stream_id,
-                        "Planner Agent",
-                        f"Planned {len(scenarios)} scenario(s) via {gen_by}: {titles}",
-                        status="success",
-                    )
+                    if str(gen_by).startswith("deterministic"):
+                        reason = planner_err or "LLM returned deterministic fallback."
+                        stream_mgr.push_log(
+                            stream_id,
+                            "Planner Agent",
+                            f"LLM planning failed ({reason}); used {gen_by} ({len(scenarios)} scenario(s)): {titles}",
+                            status="warning",
+                        )
+                    else:
+                        stream_mgr.push_log(
+                            stream_id,
+                            "Planner Agent",
+                            f"Autonomously planned {len(scenarios)} scenario(s) via {gen_by}: {titles}",
+                            status="success",
+                        )
                 elif stage_name == "persona" and out.get("personas"):
                     pr = out["personas"]
                     p_list = pr.get("personas") or []

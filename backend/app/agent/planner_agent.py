@@ -15,8 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -295,43 +294,598 @@ def list_available_models() -> dict[str, Any]:
     }
 
 
-def _extract_json_payload(raw_text: str) -> dict[str, Any]:
-    """Extract and parse a JSON object from raw LLM output (handling <think> tags and markdown fences)."""
+def _extract_json_payload(raw_text: str) -> Any:
+    """Extract and parse a JSON object or array from raw LLM output (handling <think> tags and fences)."""
     cleaned = re.sub(r"<think>.*?</think>", "", raw_text or "", flags=re.S | re.I).strip()
 
     try:
         parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
+        if isinstance(parsed, (dict, list)):
             return parsed
     except Exception:
         pass
 
-    for block in re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.S | re.I):
+    for block in re.findall(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", cleaned, flags=re.S):
+        block_clean = block.strip()
         try:
-            parsed = json.loads(block)
-            if isinstance(parsed, dict):
+            parsed = json.loads(block_clean)
+            if isinstance(parsed, (dict, list)):
                 return parsed
         except Exception:
-            continue
+            pass
+        for idx, ch in enumerate(block_clean):
+            if ch in "{[":
+                try:
+                    parsed, _ = json.JSONDecoder().raw_decode(block_clean[idx:])
+                    if isinstance(parsed, (dict, list)):
+                        return parsed
+                except Exception:
+                    continue
 
-    first_brace = cleaned.find("{")
-    last_brace = cleaned.rfind("}")
-    if first_brace != -1 and last_brace > first_brace:
-        candidate = cleaned[first_brace : last_brace + 1]
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
+    brace_positions = [idx for idx, ch in enumerate(cleaned) if ch in "{["]
+    if brace_positions:
+        first_idx = brace_positions[0]
+        last_char = "}" if cleaned[first_idx] == "{" else "]"
+        last_idx = cleaned.rfind(last_char)
+        if last_idx > first_idx:
             try:
-                decoder = json.JSONDecoder()
-                parsed, _ = decoder.raw_decode(cleaned[first_brace:])
-                if isinstance(parsed, dict):
+                parsed = json.loads(cleaned[first_idx : last_idx + 1])
+                if isinstance(parsed, (dict, list)):
                     return parsed
             except Exception:
                 pass
+        decoder = json.JSONDecoder()
+        for idx in brace_positions:
+            try:
+                parsed, _ = decoder.raw_decode(cleaned[idx:])
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except Exception:
+                continue
 
-    raise ValueError(f"Could not extract valid JSON object from response: {cleaned[:240]}")
+    raise ValueError(f"Could not extract valid JSON object or array from response: {cleaned[:240]}")
+
+
+def _build_compact_schema_hint(schema: type[BaseModel]) -> str:
+    """Return a concise, concrete JSON skeleton example without verbose $defs/$ref noise."""
+    name = getattr(schema, "__name__", "")
+    if name == "TestPlanResult":
+        return json.dumps(
+            {
+                "target_url": "https://example.com",
+                "summary": "Concise summary of tailored QA strategy",
+                "scenarios": [
+                    {
+                        "scenario_id": "SCN-001",
+                        "title": "Descriptive site-specific scenario title",
+                        "category": "smoke",
+                        "priority": "critical | high | medium | low",
+                        "description": "What this scenario validates on this exact site",
+                        "preconditions": ["Site is reachable"],
+                        "steps": [
+                            {
+                                "step_number": 1,
+                                "action": "navigate | click | fill | wait | assert_visible | assert_url",
+                                "description": "Human-readable intent",
+                                "target_hint": "#exact-selector-from-dom-or-url",
+                                "input_value": None,
+                                "expected_outcome": "Expected observable result",
+                            }
+                        ],
+                        "expected_result": "Final acceptance condition",
+                    }
+                ],
+            },
+            indent=2,
+        )
+    if name == "PersonaSuiteResult":
+        return json.dumps(
+            {
+                "target_url": "https://example.com",
+                "personas": [
+                    {
+                        "persona_id": "PRS-01",
+                        "name": "Persona Name",
+                        "role": "User Role",
+                        "behavior_profile": "methodical",
+                        "goals": ["Primary goal"],
+                        "synthetic_data": {"email": "qa.synthetic@example.com"},
+                        "target_scenarios": ["SCN-001"],
+                        "risk_focus": "Key edge case or failure mode",
+                    }
+                ],
+            },
+            indent=2,
+        )
+    if name == "_BrowserActionPlan":
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "step_number": 1,
+                        "action_type": "goto | click | fill | wait_for_selector | assert_visible | assert_url",
+                        "selector": "#css-or-aria-selector-or-null",
+                        "fallback_selectors": [],
+                        "value": "URL or text input or null",
+                        "description": "Human-readable action intent",
+                        "timeout_ms": 5000,
+                    }
+                ]
+            },
+            indent=2,
+        )
+    if name == "TriageDiagnosis":
+        return json.dumps(
+            {
+                "failure_id": "FAIL-001",
+                "category": "SELECTOR_DRIFT | BACKEND_API_ERROR | NETWORK_TIMEOUT | ASSERTION_FAILURE | CONSOLE_EXCEPTION",
+                "severity": "critical | high | medium | low",
+                "confidence": 0.9,
+                "root_cause_summary": "Concise root cause",
+                "verdict": "Short verdict",
+                "needs_healing": True,
+                "recommended_next_agent": "healing_agent | human_review | retry_verification",
+                "evidence_highlights": ["Supporting log or DOM clue"],
+            },
+            indent=2,
+        )
+    if name == "HealingSuggestion":
+        framework_patch = {
+            "framework": "playwright | cypress | selenium",
+            "healed_selector": "Resilient selector",
+            "code_snippet": "Framework code snippet",
+            "explanation": "Why this selector works",
+        }
+        return json.dumps(
+            {
+                "failure_id": "FAIL-001",
+                "failed_selector": "#broken-selector",
+                "primary_healed_locator": "getByRole('button', { name: 'Submit' })",
+                "locator_strategy": "aria_role",
+                "confidence": 0.9,
+                "rationale": "Why this locator resists DOM drift",
+                "playwright": {**framework_patch, "framework": "playwright"},
+                "cypress": {**framework_patch, "framework": "cypress"},
+                "selenium": {**framework_patch, "framework": "selenium"},
+            },
+            indent=2,
+        )
+    return json.dumps(schema.model_json_schema(), indent=2)
+
+
+def _normalize_priority(raw_val: Any, default: str = "medium") -> str:
+    val = str(raw_val or "").strip().lower()
+    if val in ("critical", "high", "medium", "low"):
+        return val
+    if val in ("p0", "blocker", "urgent", "highest", "sev1", "s1"):
+        return "critical"
+    if val in ("p1", "important", "major", "sev2", "s2"):
+        return "high"
+    if val in ("p2", "normal", "moderate", "standard", "sev3", "s3"):
+        return "medium"
+    if val in ("p3", "p4", "minor", "trivial", "lowest", "sev4", "s4"):
+        return "low"
+    return default
+
+
+def _to_positive_int(raw_val: Any, default: int, minimum: int = 1) -> int:
+    if isinstance(raw_val, bool):
+        return max(minimum, default)
+    if isinstance(raw_val, (int, float)):
+        return max(minimum, int(raw_val))
+    if isinstance(raw_val, str):
+        digits = re.findall(r"-?\d+", raw_val)
+        if digits:
+            return max(minimum, int(digits[0]))
+    return max(minimum, default)
+
+
+def _to_str_list(raw_val: Any) -> list[str]:
+    if isinstance(raw_val, str):
+        s = raw_val.strip()
+        return [s] if s else []
+    if isinstance(raw_val, list):
+        return [str(x).strip() for x in raw_val if x is not None and str(x).strip()]
+    return []
+
+
+def _unwrap_payload_dict(parsed: Any, wrapper_keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return {}
+    current: dict[str, Any] = dict(parsed)
+    for _ in range(2):
+        unwrapped = False
+        for key in wrapper_keys:
+            inner = current.get(key)
+            if isinstance(inner, dict):
+                current = dict(inner)
+                unwrapped = True
+                break
+        if unwrapped:
+            continue
+        if len(current) == 1:
+            only_val = next(iter(current.values()))
+            if isinstance(only_val, dict):
+                current = dict(only_val)
+                continue
+        break
+    return current
+
+
+def _coerce_structured_payload(schema: type[BaseModel], parsed: Any) -> Any:
+    """Normalize minor free-model JSON formatting variations before strict Pydantic validation."""
+    name = getattr(schema, "__name__", "")
+
+    if name == "TestPlanResult":
+        if isinstance(parsed, list):
+            data: dict[str, Any] = {"scenarios": parsed}
+        elif isinstance(parsed, dict):
+            data = _unwrap_payload_dict(
+                parsed,
+                ("test_plan", "plan", "testPlan", "result", "data", "output", "response"),
+            )
+            if "scenarios" not in data:
+                for alt_key in ("test_scenarios", "testScenarios", "test_cases", "testCases", "cases", "tests"):
+                    if alt_key in data:
+                        data["scenarios"] = data[alt_key]
+                        break
+                else:
+                    if isinstance(parsed.get("scenarios"), list):
+                        data["scenarios"] = parsed["scenarios"]
+                    elif "steps" in data and ("title" in data or "name" in data):
+                        data = {"scenarios": [data]}
+        else:
+            raise ValueError("TestPlanResult payload must be a JSON object or array.")
+
+        raw_scenarios = data.get("scenarios")
+        if not isinstance(raw_scenarios, list) or not raw_scenarios:
+            raise ValueError("LLM output did not include any test scenarios.")
+
+        norm_scenarios: list[dict[str, Any]] = []
+        for idx, raw_sc in enumerate(raw_scenarios, start=1):
+            if isinstance(raw_sc, str):
+                sc: dict[str, Any] = {"title": raw_sc}
+            elif isinstance(raw_sc, dict):
+                sc = dict(raw_sc)
+            else:
+                continue
+
+            title = str(sc.get("title") or sc.get("name") or sc.get("scenario_name") or f"Scenario {idx}").strip()
+            raw_steps = sc.get("steps") or sc.get("actions") or []
+            if isinstance(raw_steps, dict):
+                raw_steps = [raw_steps]
+            elif isinstance(raw_steps, str):
+                raw_steps = [raw_steps]
+            elif not isinstance(raw_steps, list):
+                raw_steps = []
+
+            norm_steps: list[dict[str, Any]] = []
+            for s_idx, raw_st in enumerate(raw_steps, start=1):
+                if isinstance(raw_st, str):
+                    st_text = raw_st.strip()
+                    if not st_text:
+                        continue
+                    norm_steps.append(
+                        {
+                            "step_number": s_idx,
+                            "action": "assert_visible",
+                            "description": st_text,
+                            "target_hint": None,
+                            "input_value": None,
+                            "expected_outcome": "",
+                        }
+                    )
+                    continue
+                if not isinstance(raw_st, dict):
+                    continue
+                action = (
+                    str(
+                        raw_st.get("action")
+                        or raw_st.get("action_type")
+                        or raw_st.get("type")
+                        or raw_st.get("verb")
+                        or "click"
+                    )
+                    .strip()
+                    .lower()
+                    or "click"
+                )
+                raw_target = (
+                    raw_st.get("target_hint")
+                    or raw_st.get("selector")
+                    or raw_st.get("locator")
+                    or raw_st.get("target")
+                    or raw_st.get("element")
+                )
+                target_hint = str(raw_target).strip() if raw_target is not None and str(raw_target).strip() else None
+                raw_input = (
+                    raw_st.get("input_value")
+                    if raw_st.get("input_value") is not None
+                    else (raw_st.get("value") if raw_st.get("value") is not None else raw_st.get("input"))
+                )
+                input_value = str(raw_input) if raw_input is not None else None
+                desc = str(
+                    raw_st.get("description")
+                    or raw_st.get("intent")
+                    or raw_st.get("instruction")
+                    or raw_st.get("name")
+                    or f"{action} {target_hint or ''}".strip()
+                ).strip() or f"Step {s_idx}"
+                raw_outcome = (
+                    raw_st.get("expected_outcome")
+                    or raw_st.get("expected_result")
+                    or raw_st.get("expected")
+                    or ""
+                )
+                norm_steps.append(
+                    {
+                        "step_number": _to_positive_int(
+                            raw_st.get("step_number") or raw_st.get("step") or raw_st.get("order") or raw_st.get("index"),
+                            default=s_idx,
+                        ),
+                        "action": action,
+                        "description": desc,
+                        "target_hint": target_hint,
+                        "input_value": input_value,
+                        "expected_outcome": str(raw_outcome).strip(),
+                    }
+                )
+
+            norm_scenarios.append(
+                {
+                    "scenario_id": str(sc.get("scenario_id") or sc.get("id") or f"SCN-{idx:03d}").strip() or f"SCN-{idx:03d}",
+                    "title": title,
+                    "category": str(sc.get("category") or sc.get("type") or "e2e").strip() or "e2e",
+                    "priority": _normalize_priority(sc.get("priority"), default="high" if idx == 1 else "medium"),
+                    "description": str(sc.get("description") or sc.get("objective") or sc.get("scope") or title).strip() or title,
+                    "preconditions": _to_str_list(sc.get("preconditions")),
+                    "steps": norm_steps,
+                    "expected_result": str(
+                        sc.get("expected_result")
+                        or sc.get("expected_outcome")
+                        or sc.get("acceptance_criteria")
+                        or sc.get("expected")
+                        or "Scenario completes without console or navigation errors."
+                    ).strip(),
+                }
+            )
+
+        if not norm_scenarios:
+            raise ValueError("LLM output did not contain any valid test scenarios.")
+
+        summary = str(data.get("summary") or "").strip()
+        if not summary:
+            summary = "Tailored test plan covering: " + ", ".join(s["title"] for s in norm_scenarios[:4])
+
+        return {
+            "target_url": str(data.get("target_url") or data.get("url") or "").strip(),
+            "summary": summary,
+            "scenarios": norm_scenarios,
+            "generated_by": str(data.get("generated_by") or "langchain"),
+        }
+
+    if name == "PersonaSuiteResult":
+        if isinstance(parsed, list):
+            data = {"personas": parsed}
+        elif isinstance(parsed, dict):
+            data = _unwrap_payload_dict(parsed, ("persona_suite", "suite", "result", "data", "output", "response"))
+            if "personas" not in data:
+                for alt_key in ("user_personas", "users", "profiles"):
+                    if alt_key in data:
+                        data["personas"] = data[alt_key]
+                        break
+                else:
+                    if isinstance(parsed.get("personas"), list):
+                        data["personas"] = parsed["personas"]
+        else:
+            raise ValueError("PersonaSuiteResult payload must be a JSON object or array.")
+
+        raw_personas = data.get("personas")
+        if not isinstance(raw_personas, list) or not raw_personas:
+            raise ValueError("LLM output did not include any personas.")
+
+        norm_personas: list[dict[str, Any]] = []
+        for idx, raw_p in enumerate(raw_personas, start=1):
+            if not isinstance(raw_p, dict):
+                continue
+            synth = raw_p.get("synthetic_data")
+            norm_personas.append(
+                {
+                    "persona_id": str(raw_p.get("persona_id") or raw_p.get("id") or f"PRS-{idx:02d}").strip() or f"PRS-{idx:02d}",
+                    "name": str(raw_p.get("name") or f"Persona {idx}").strip(),
+                    "role": str(raw_p.get("role") or "QA Explorer").strip(),
+                    "behavior_profile": str(raw_p.get("behavior_profile") or raw_p.get("behavior") or "methodical").strip(),
+                    "goals": _to_str_list(raw_p.get("goals")),
+                    "synthetic_data": dict(synth) if isinstance(synth, dict) else {},
+                    "target_scenarios": _to_str_list(raw_p.get("target_scenarios") or raw_p.get("scenarios")),
+                    "risk_focus": str(raw_p.get("risk_focus") or "").strip(),
+                }
+            )
+        if not norm_personas:
+            raise ValueError("LLM output did not contain any valid personas.")
+
+        return {
+            "target_url": str(data.get("target_url") or data.get("url") or "").strip(),
+            "personas": norm_personas,
+            "generated_by": str(data.get("generated_by") or "langchain"),
+        }
+
+    if name == "_BrowserActionPlan":
+        if isinstance(parsed, list):
+            data = {"actions": parsed}
+        elif isinstance(parsed, dict):
+            data = _unwrap_payload_dict(parsed, ("action_plan", "browser_action_plan", "plan", "result", "data", "output", "response"))
+            if "actions" not in data:
+                for alt_key in ("steps", "browser_actions"):
+                    if alt_key in data:
+                        data["actions"] = data[alt_key]
+                        break
+                else:
+                    if isinstance(parsed.get("actions"), list):
+                        data["actions"] = parsed["actions"]
+        else:
+            raise ValueError("_BrowserActionPlan payload must be a JSON object or array.")
+
+        raw_actions = data.get("actions")
+        if not isinstance(raw_actions, list) or not raw_actions:
+            raise ValueError("LLM output did not include any browser actions.")
+
+        action_map = {
+            "goto": "goto",
+            "navigate": "goto",
+            "open": "goto",
+            "visit": "goto",
+            "go": "goto",
+            "load": "goto",
+            "click": "click",
+            "press": "click",
+            "tap": "click",
+            "submit": "click",
+            "hover": "click",
+            "toggle": "click",
+            "fill": "fill",
+            "type": "fill",
+            "input": "fill",
+            "enter": "fill",
+            "select": "fill",
+            "wait_for_selector": "wait_for_selector",
+            "wait": "wait_for_selector",
+            "wait_for": "wait_for_selector",
+            "sleep": "wait_for_selector",
+            "assert_url": "assert_url",
+            "check_url": "assert_url",
+            "verify_url": "assert_url",
+            "url": "assert_url",
+            "assert_visible": "assert_visible",
+            "verify": "assert_visible",
+            "check": "assert_visible",
+            "assert": "assert_visible",
+            "expect_visible": "assert_visible",
+            "inspect": "assert_visible",
+        }
+
+        norm_actions: list[dict[str, Any]] = []
+        for idx, raw_act in enumerate(raw_actions, start=1):
+            if not isinstance(raw_act, dict):
+                continue
+            raw_type = (
+                str(
+                    raw_act.get("action_type")
+                    or raw_act.get("action")
+                    or raw_act.get("type")
+                    or raw_act.get("verb")
+                    or "assert_visible"
+                )
+                .strip()
+                .lower()
+            )
+            mapped_type = action_map.get(raw_type, "assert_visible")
+            raw_sel = (
+                raw_act.get("selector")
+                or raw_act.get("target_hint")
+                or raw_act.get("locator")
+                or raw_act.get("target")
+                or raw_act.get("element")
+            )
+            selector = str(raw_sel).strip() if raw_sel is not None and str(raw_sel).strip() else None
+            raw_val = (
+                raw_act.get("value")
+                if raw_act.get("value") is not None
+                else (raw_act.get("input_value") if raw_act.get("input_value") is not None else raw_act.get("input"))
+            )
+            val_str = str(raw_val) if raw_val is not None else None
+            norm_actions.append(
+                {
+                    "step_number": _to_positive_int(
+                        raw_act.get("step_number") or raw_act.get("step") or raw_act.get("order") or raw_act.get("index"),
+                        default=idx,
+                    ),
+                    "action_type": mapped_type,
+                    "selector": selector,
+                    "fallback_selectors": _to_str_list(raw_act.get("fallback_selectors")),
+                    "value": val_str,
+                    "description": str(
+                        raw_act.get("description") or raw_act.get("intent") or f"{mapped_type} {selector or val_str or ''}".strip()
+                    ).strip(),
+                    "timeout_ms": _to_positive_int(raw_act.get("timeout_ms"), default=5000, minimum=100),
+                }
+            )
+        if not norm_actions:
+            raise ValueError("LLM output did not contain any valid browser actions.")
+        return {"actions": norm_actions}
+
+    if name == "TriageDiagnosis" and isinstance(parsed, dict):
+        data = _unwrap_payload_dict(parsed, ("diagnosis", "triage_diagnosis", "triage", "result", "data", "output"))
+        raw_cat = str(data.get("category") or "ASSERTION_FAILURE").strip().upper().replace(" ", "_")
+        allowed_cats = {"SELECTOR_DRIFT", "BACKEND_API_ERROR", "NETWORK_TIMEOUT", "ASSERTION_FAILURE", "CONSOLE_EXCEPTION"}
+        if raw_cat not in allowed_cats:
+            if "SELECTOR" in raw_cat or "LOCATOR" in raw_cat:
+                raw_cat = "SELECTOR_DRIFT"
+            elif "TIMEOUT" in raw_cat or "NETWORK" in raw_cat:
+                raw_cat = "NETWORK_TIMEOUT"
+            elif "CONSOLE" in raw_cat or "JS" in raw_cat:
+                raw_cat = "CONSOLE_EXCEPTION"
+            elif "API" in raw_cat or "BACKEND" in raw_cat or "500" in raw_cat:
+                raw_cat = "BACKEND_API_ERROR"
+            else:
+                raw_cat = "ASSERTION_FAILURE"
+        needs_healing = bool(data.get("needs_healing", raw_cat == "SELECTOR_DRIFT"))
+        raw_next = str(data.get("recommended_next_agent") or ("healing_agent" if needs_healing else "human_review")).strip().lower()
+        if raw_next not in ("healing_agent", "human_review", "retry_verification"):
+            raw_next = "healing_agent" if needs_healing else "human_review"
+        try:
+            conf = float(data.get("confidence", 0.7))
+        except Exception:
+            conf = 0.7
+        return {
+            "failure_id": str(data.get("failure_id") or "FAIL-001").strip(),
+            "category": raw_cat,
+            "severity": _normalize_priority(data.get("severity"), default="medium"),
+            "confidence": max(0.0, min(1.0, conf)),
+            "root_cause_summary": str(data.get("root_cause_summary") or data.get("summary") or "Failure diagnosed by TriageAgent.").strip(),
+            "verdict": str(data.get("verdict") or raw_cat).strip(),
+            "needs_healing": needs_healing,
+            "recommended_next_agent": raw_next,
+            "evidence_highlights": _to_str_list(data.get("evidence_highlights")),
+        }
+
+    if name == "HealingSuggestion" and isinstance(parsed, dict):
+        data = _unwrap_payload_dict(parsed, ("healing_suggestion", "healing", "suggestion", "result", "data", "output"))
+        primary = str(data.get("primary_healed_locator") or data.get("healed_selector") or "button").strip()
+        try:
+            conf = float(data.get("confidence", 0.8))
+        except Exception:
+            conf = 0.8
+
+        def _coerce_fw(fw_name: str, default_code: str) -> dict[str, str]:
+            raw_fw = data.get(fw_name)
+            if isinstance(raw_fw, dict):
+                return {
+                    "framework": fw_name,
+                    "healed_selector": str(raw_fw.get("healed_selector") or primary).strip(),
+                    "code_snippet": str(raw_fw.get("code_snippet") or default_code).strip(),
+                    "explanation": str(raw_fw.get("explanation") or f"Resilient {fw_name} locator.").strip(),
+                }
+            return {
+                "framework": fw_name,
+                "healed_selector": primary,
+                "code_snippet": default_code,
+                "explanation": f"Resilient {fw_name} locator.",
+            }
+
+        return {
+            "failure_id": str(data.get("failure_id") or "FAIL-001").strip(),
+            "failed_selector": str(data.get("failed_selector") or "").strip() or "unknown",
+            "primary_healed_locator": primary,
+            "locator_strategy": str(data.get("locator_strategy") or "aria_role").strip(),
+            "confidence": max(0.0, min(1.0, conf)),
+            "rationale": str(data.get("rationale") or "Resilient accessible selector synthesized from DOM context.").strip(),
+            "playwright": _coerce_fw("playwright", f"await page.locator({json.dumps(primary)}).click();"),
+            "cypress": _coerce_fw("cypress", f"cy.get({json.dumps(primary)}).click();"),
+            "selenium": _coerce_fw("selenium", f"driver.find_element(By.CSS_SELECTOR, {json.dumps(primary)}).click()"),
+        }
+
+    return parsed
 
 
 class _OpenRouterChatModel(BaseChatModel):
@@ -408,7 +962,7 @@ class _OpenRouterChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
-        schema_json = json.dumps(schema.model_json_schema(), indent=2)
+        schema_hint = _build_compact_schema_hint(schema)
 
         def _invoke_structured(prompt_val: Any) -> Any:
             if hasattr(prompt_val, "to_messages"):
@@ -422,8 +976,8 @@ class _OpenRouterChatModel(BaseChatModel):
             instruction = (
                 "\n\nIMPORTANT OUTPUT REQUIREMENT:\n"
                 "Return ONLY a single valid JSON object (no markdown fences, no commentary, no extra text) "
-                "conforming strictly to this JSON Schema:\n"
-                f"{schema_json}"
+                "matching this exact JSON structure:\n"
+                f"{schema_hint}"
             )
             if api_msgs and api_msgs[-1]["role"] == "user":
                 api_msgs[-1] = {**api_msgs[-1], "content": api_msgs[-1]["content"] + instruction}
@@ -432,7 +986,8 @@ class _OpenRouterChatModel(BaseChatModel):
 
             raw_text = self._call_api(api_msgs)
             parsed = _extract_json_payload(raw_text)
-            return schema.model_validate(parsed)
+            coerced = _coerce_structured_payload(schema, parsed)
+            return schema.model_validate(coerced)
 
         return RunnableLambda(_invoke_structured)
 
@@ -614,7 +1169,7 @@ def invoke_with_model_fallback(
     except Exception as exc:
         err_str = str(exc)
         err_low = err_str.lower()
-        is_recoverable = any(
+        is_recoverable = isinstance(exc, (ValueError, ValidationError)) or any(
             tok in err_low
             for tok in (
                 "404",
@@ -623,7 +1178,11 @@ def invoke_with_model_fallback(
                 "is not found",
                 "no endpoints found",
                 "provider returned error",
+                "500",
+                "502",
                 "503",
+                "504",
+                "bad gateway",
                 "unavailable",
                 "429",
                 "resource_exhausted",
@@ -632,13 +1191,25 @@ def invoke_with_model_fallback(
                 "high demand",
                 "timed out",
                 "timeout",
+                "readtimeout",
+                "connect",
+                "remoteprotocolerror",
                 "could not extract valid json",
+                "validation error",
+                "field required",
+                "invalid json",
+                "empty choices",
             )
         )
         if not allow_fallback or not is_recoverable:
             raise
 
-        _UNAVAILABLE_MODELS.add(failed_model)
+        is_not_found = any(
+            tok in err_low
+            for tok in ("404", "not_found", "no longer available", "is not found", "no endpoints found")
+        )
+        if failed_model != "openrouter/free" or is_not_found:
+            _UNAVAILABLE_MODELS.add(failed_model)
 
         if eff_provider == "openrouter":
             pool = [
@@ -667,7 +1238,7 @@ def invoke_with_model_fallback(
                 candidates.append(clean)
 
         last_exc: Exception = exc
-        for cand in candidates[:2]:
+        for cand in candidates[:4]:
             alt_llm = resolve_chat_model(
                 model_name=cand,
                 provider=eff_provider,
@@ -686,7 +1257,13 @@ def invoke_with_model_fallback(
                 logger.info("[AgentSwarm LLM] Recovered from '%s' error -> using '%s'", failed_model, cand)
                 return res, cand
             except Exception as cand_exc:
-                _UNAVAILABLE_MODELS.add(cand)
+                cand_err_low = str(cand_exc).lower()
+                cand_not_found = any(
+                    tok in cand_err_low
+                    for tok in ("404", "not_found", "no longer available", "is not found", "no endpoints found")
+                )
+                if cand != "openrouter/free" or cand_not_found:
+                    _UNAVAILABLE_MODELS.add(cand)
                 last_exc = cand_exc
                 continue
         raise last_exc
@@ -734,6 +1311,7 @@ class PlannerGraphState(TypedDict, total=False):
     objectives: list[str]
     prompt_input: dict[str, str]
     test_plan: TestPlanResult
+    planner_error: Optional[str]
 
 
 class PlannerAgent:
@@ -746,9 +1324,17 @@ class PlannerAgent:
     """
 
     SYSTEM_PROMPT = (
-        "You are the Lead QA Planner Agent for AgentSwarm. Design concise, realistic, "
-        "non-destructive end-to-end browser test plans using semantic accessibility hints. "
-        "Only target authorized/staging workflows and never invent destructive actions."
+        "You are the Lead QA Planner Agent for AgentSwarm. Inspect the live DOM / Route Summary carefully "
+        "to determine what kind of web application this actually is (for example: portfolio, SaaS product, "
+        "documentation site, blog, e-commerce store, or interactive web app), and autonomously design concise, "
+        "non-destructive end-to-end browser test scenarios tailored specifically to its REAL features and DOM elements.\n\n"
+        "Strict Planning Rules:\n"
+        "1. NEVER invent login/authentication, checkout/cart, or form submission scenarios if no corresponding "
+        "login, cart, or form controls appear in the DOM summary.\n"
+        "2. Use exact selectors or locators shown in the DOM / Route Summary for every step's target_hint.\n"
+        "3. If an entry gate, splash screen, or intro overlay button (such as skip/enter intro) appears in the DOM, "
+        "include dismissing/clicking it BEFORE interacting with underlying navigation links or sections.\n"
+        "4. Give each scenario a specific, meaningful title reflecting the actual website functionality under test."
     )
 
     def __init__(
@@ -762,6 +1348,7 @@ class PlannerAgent:
         self._model_name = model_name
         self._provider = provider
         self._custom_llm_injected = llm is not None
+        self._last_llm_error: Optional[str] = None
         self._llm: Optional[BaseChatModel] = llm or resolve_chat_model(
             model_name=model_name,
             provider=provider,
@@ -776,8 +1363,11 @@ class PlannerAgent:
                     "Target URL: {target_url}\n\n"
                     "Testing Objectives:\n{objectives_text}\n\n"
                     "DOM / Route Summary:\n{dom_summary}\n\n"
-                    "Generate 3 to 5 prioritized end-to-end test scenarios covering smoke navigation, "
-                    "primary user workflow, authentication/session state, and negative edge cases.",
+                    "First identify what this specific application does based on the headings, landmarks, links, "
+                    "buttons, overlays, and inputs in the DOM summary above. Then design 2 to 4 distinct, realistic, "
+                    "non-redundant end-to-end test scenarios tailored specifically to the real interactive elements and "
+                    "sections present on this page (plus any explicit Testing Objectives above). Use exact selectors "
+                    "from the DOM summary as target_hint.",
                 ),
             ]
         )
@@ -793,11 +1383,9 @@ class PlannerAgent:
             url = f"https://{url}"
         return url
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
     def _invoke_chain(self, prompt_input: dict[str, str]) -> TestPlanResult:
         if not self._chain:
             raise RuntimeError("LangChain structured output chain is not configured.")
-        result = self._chain.invoke(prompt_input)
         result, resolved_model = invoke_with_model_fallback(
             self._prompt,
             TestPlanResult,
@@ -811,15 +1399,17 @@ class PlannerAgent:
         )
         if not isinstance(result, TestPlanResult):
             result = TestPlanResult.model_validate(result)
-        
+        if not result.scenarios:
+            raise ValueError("LLM returned zero test scenarios.")
+
         result.generated_by = f"langchain:{resolved_model}" if resolved_model else "langchain"
         return result
 
     def _node_prepare_input(self, state: PlannerGraphState) -> dict[str, Any]:
         normalized_url = self._normalize_url(state.get("target_url", ""))
         objectives = state.get("objectives") or []
-        objectives_text = "\n".join(f"- {obj}" for obj in objectives) if objectives else "- Core smoke and user workflows"
-        dom_summary = (state.get("dom_summary") or "No DOM summary provided")[:4000]
+        objectives_text = "\n".join(f"- {obj}" for obj in objectives) if objectives else "- Autonomously test the primary user journeys visible in the live DOM"
+        dom_summary = (state.get("dom_summary") or "No DOM summary provided")[:6000]
         return {
             "normalized_url": normalized_url,
             "prompt_input": {
@@ -831,19 +1421,26 @@ class PlannerAgent:
 
     def _node_generate_plan(self, state: PlannerGraphState) -> dict[str, Any]:
         normalized_url = state["normalized_url"]
+        planner_error: Optional[str] = None
+        self._last_llm_error = None
         if self._chain:
             try:
                 plan = self._invoke_chain(state["prompt_input"])
-                return {"test_plan": plan}
+                return {"test_plan": plan, "planner_error": None}
             except Exception as exc:
+                planner_error = str(exc).strip()[:220]
+                self._last_llm_error = planner_error
                 logger.warning("[PlannerAgent] LangChain invocation failed, using deterministic fallback: %s", exc)
+        else:
+            planner_error = "Deterministic mode selected (no LLM configured)."
+            self._last_llm_error = planner_error
 
         plan = self._build_fallback_plan(
             target_url=normalized_url,
             dom_summary=state.get("dom_summary"),
             objectives=state.get("objectives"),
         )
-        return {"test_plan": plan}
+        return {"test_plan": plan, "planner_error": planner_error}
 
     @staticmethod
     def _node_finalize_plan(state: PlannerGraphState) -> dict[str, Any]:
@@ -942,10 +1539,9 @@ class PlannerAgent:
         dom_summary: Optional[str],
         objectives: Optional[list[str]],
     ) -> TestPlanResult:
-        dom_lower = (dom_summary or "").lower()
         candidates = cls._extract_dom_candidates(dom_summary)
         headings = cls._extract_headings(dom_summary)
-        site_label = headings[0][:40] if headings else target_url
+        site_label = headings[0][:50] if headings else target_url
 
         buttons = [c for c in candidates if c["role"] == "button" or c["tag"] == "button"]
         links = [c for c in candidates if c["role"] == "link" or c["tag"] == "a"]
@@ -957,218 +1553,91 @@ class PlannerAgent:
 
         scenarios: list[TestScenario] = []
 
-        # Scenario 1: Landing & Primary Element Smoke (using real DOM targets when discovered)
-        scn1_steps: list[TestStepPlan] = [
+        # Purely dynamic DOM-driven exploration from real discovered elements (no fixed templates)
+        steps: list[TestStepPlan] = [
             TestStepPlan(
                 step_number=1,
                 action="navigate",
                 description=f"Open {site_label} ({target_url})",
                 target_hint=target_url,
-                expected_outcome="HTTP 2xx response and main document renders",
+                expected_outcome="HTTP 2xx response and page document loads",
             )
         ]
         if intro_btns:
             ib = intro_btns[0]
-            ib_label = ib["name"] or ib["id"] or "Entry / Skip Intro"
-            scn1_steps.append(
+            ib_label = ib["name"] or ib["id"] or "Skip / Enter"
+            steps.append(
                 TestStepPlan(
-                    step_number=len(scn1_steps) + 1,
+                    step_number=len(steps) + 1,
                     action="click",
-                    description=f"Dismiss intro / entry overlay via '{ib_label[:40]}'",
+                    description=f"Dismiss intro overlay via '{ib_label[:45]}'",
                     target_hint=ib["locator"],
-                    expected_outcome="Main page content becomes visible",
+                    expected_outcome="Underlying page content becomes accessible",
                 )
             )
-        scn1_steps.append(
+
+        steps.append(
             TestStepPlan(
-                step_number=len(scn1_steps) + 1,
+                step_number=len(steps) + 1,
                 action="assert_visible",
-                description=f"Verify primary content landmarks on {site_label} are visible",
+                description=f"Verify primary landmarks render visibly on {site_label}",
                 target_hint="main, body, h1",
-                expected_outcome="Primary application shell and heading render visibly",
+                expected_outcome="Primary content renders without layout failure",
             )
         )
-        if links:
-            first_link = next(
-                (lk for lk in links if "skip" not in (lk["name"] + lk["id"]).lower()),
-                links[0],
-            )
-            label = first_link["name"] or "primary link"
-            scn1_steps.append(
+
+        # Exercise up to 2 real discovered interactive links/buttons
+        interactive_pool: list[dict[str, str]] = []
+        for lk in links:
+            if lk not in interactive_pool and "skip" not in (lk["name"] + " " + lk["id"]).lower():
+                interactive_pool.append(lk)
+        for btn in buttons:
+            if btn not in intro_btns and btn not in interactive_pool:
+                interactive_pool.append(btn)
+
+        for item in interactive_pool[:2]:
+            label = item["name"] or item["id"] or item["tag"]
+            steps.append(
                 TestStepPlan(
-                    step_number=len(scn1_steps) + 1,
+                    step_number=len(steps) + 1,
                     action="click",
-                    description=f"Click discovered link '{label[:45]}'",
-                    target_hint=first_link["locator"],
-                    expected_outcome="Navigation or interaction executes without console or network errors",
+                    description=f"Click discovered {item['role'] or item['tag']} '{label[:45]}'",
+                    target_hint=item["locator"],
+                    expected_outcome="Control interacts cleanly without runtime or console errors",
                 )
             )
-        elif buttons:
-            non_intro = [b for b in buttons if b not in intro_btns]
-            first_btn = non_intro[0] if non_intro else buttons[0]
-            label = first_btn["name"] or "primary button"
-            scn1_steps.append(
+
+        # Only populate real discovered form inputs if inputs actually exist in the DOM
+        for inp in inputs[:2]:
+            inp_label = inp["name"] or inp["id"] or "input"
+            sample_val = (
+                "qa.synthetic@agentswarm.dev"
+                if "email" in inp_label.lower()
+                else ("SyntheticPass!2026" if "pass" in inp_label.lower() else "AgentSwarm QA Test")
+            )
+            steps.append(
                 TestStepPlan(
-                    step_number=len(scn1_steps) + 1,
-                    action="click",
-                    description=f"Click discovered button '{label[:45]}'",
-                    target_hint=first_btn["locator"],
-                    expected_outcome="Button responds cleanly without runtime exception",
+                    step_number=len(steps) + 1,
+                    action="fill",
+                    description=f"Fill discovered input '{inp_label[:40]}' with synthetic QA data",
+                    target_hint=inp["locator"],
+                    input_value=sample_val,
+                    expected_outcome=f"Input '{inp_label[:40]}' accepts text cleanly",
                 )
             )
 
         scenarios.append(
             TestScenario(
                 scenario_id="SCN-001",
-                title=f"{site_label}: Landing & Discovered Navigation Smoke",
+                title=f"{site_label}: DOM Exploration",
                 category="smoke",
-                priority="critical",
-                description=f"Verify initial render and real DOM interactive controls on {site_label}.",
-                preconditions=["Application URL is reachable", "Clean browser context"],
-                steps=scn1_steps,
-                expected_result="Application loads cleanly with accessible interactive controls.",
+                priority="high",
+                description=f"Deterministic DOM-driven fallback exploration of real discovered controls on {site_label}.",
+                preconditions=["Application URL is reachable"],
+                steps=steps,
+                expected_result="Discovered page landmarks and interactive controls function cleanly.",
             )
         )
-
-        # Scenario 2: Discovered Forms / Inputs OR Authentication Flow
-        if inputs:
-            form_steps: list[TestStepPlan] = [
-                TestStepPlan(
-                    step_number=1,
-                    action="navigate",
-                    description=f"Ensure target page {target_url} is loaded",
-                    target_hint=target_url,
-                    expected_outcome="Page form inputs are ready",
-                )
-            ]
-            step_num = 2
-            for inp in inputs[:3]:
-                inp_label = inp["name"] or inp["id"] or "input field"
-                sample_val = (
-                    "qa.synthetic@agentswarm.dev"
-                    if "email" in inp_label.lower()
-                    else ("SyntheticPass!2026" if "pass" in inp_label.lower() else "AgentSwarm QA Test")
-                )
-                form_steps.append(
-                    TestStepPlan(
-                        step_number=step_num,
-                        action="fill",
-                        description=f"Populate '{inp_label[:40]}' input with synthetic QA value",
-                        target_hint=inp["locator"],
-                        input_value=sample_val,
-                        expected_outcome=f"Input '{inp_label[:40]}' accepts synthetic text cleanly",
-                    )
-                )
-                step_num += 1
-            if buttons:
-                submit_btn = buttons[0]
-                btn_label = submit_btn["name"] or "Submit"
-                form_steps.append(
-                    TestStepPlan(
-                        step_number=step_num,
-                        action="click",
-                        description=f"Click '{btn_label[:40]}' button to submit form",
-                        target_hint=submit_btn["locator"],
-                        expected_outcome="Submission triggers expected state change without 5xx error",
-                    )
-                )
-            scenarios.append(
-                TestScenario(
-                    scenario_id="SCN-002",
-                    title="Discovered Form Inputs & Submission Journey",
-                    category="e2e",
-                    priority="high",
-                    description="Populate real discovered form inputs with synthetic QA data and verify interaction.",
-                    preconditions=["Form elements present in live DOM"],
-                    steps=form_steps,
-                    expected_result="All discovered form controls accept synthetic inputs and submit cleanly.",
-                )
-            )
-        elif len(buttons) >= 2 or "sign in" in dom_lower or "login" in dom_lower:
-            btn_target = buttons[0]["locator"] if buttons else "button"
-            btn_name = (buttons[0]["name"] or "Action") if buttons else "Action"
-            scenarios.append(
-                TestScenario(
-                    scenario_id="SCN-002",
-                    title="Interactive Controls & CTA Verification",
-                    category="auth" if ("sign in" in dom_lower or "login" in dom_lower) else "e2e",
-                    priority="high",
-                    description="Exercise discovered interactive buttons and verify visual state transitions.",
-                    preconditions=["Target page rendered"],
-                    steps=[
-                        TestStepPlan(
-                            step_number=1,
-                            action="navigate",
-                            description=f"Open {target_url}",
-                            target_hint=target_url,
-                            expected_outcome="Page rendered",
-                        ),
-                        TestStepPlan(
-                            step_number=2,
-                            action="assert_visible",
-                            description=f"Verify button '{btn_name[:40]}' is visible",
-                            target_hint=btn_target,
-                            expected_outcome="Interactive button is visible",
-                        ),
-                        TestStepPlan(
-                            step_number=3,
-                            action="click",
-                            description=f"Click '{btn_name[:40]}' control",
-                            target_hint=btn_target,
-                            expected_outcome="UI transitions cleanly without console error",
-                        ),
-                    ],
-                    expected_result="Discovered buttons respond cleanly.",
-                )
-            )
-
-        # Scenario 3: Commerce / Core Interactive Workflow Verification
-        is_commerce = any(token in dom_lower for token in ("checkout", "cart", "product", "price", "order"))
-        if is_commerce or not scenarios or len(scenarios) < 2:
-            cta_hint = (
-                buttons[-1]["locator"]
-                if buttons
-                else "button[type='submit'], .cta-primary, getByRole('button', { name: /proceed|deploy|start/i })"
-            )
-            cta_label = (buttons[-1]["name"] or "primary CTA") if buttons else "primary CTA"
-            scenarios.append(
-                TestScenario(
-                    scenario_id=f"SCN-{len(scenarios) + 1:03d}",
-                    title="Multi-Stage Checkout Journey" if is_commerce else "Core Interactive Workflow Verification",
-                    category="checkout" if is_commerce else "e2e",
-                    priority="high",
-                    description=(
-                        "Execute end-to-end cart addition and checkout CTA progression while monitoring selector resilience."
-                        if is_commerce
-                        else "Validate primary user workflow controls, state transitions, and submission feedback."
-                    ),
-                    preconditions=["Main view loaded"],
-                    steps=[
-                        TestStepPlan(
-                            step_number=1,
-                            action="navigate",
-                            description=f"Ensure application context at {target_url}",
-                            target_hint=target_url,
-                            expected_outcome="Application active",
-                        ),
-                        TestStepPlan(
-                            step_number=2,
-                            action="click",
-                            description=f"Trigger '{cta_label[:40]}' action button",
-                            target_hint=cta_hint,
-                            expected_outcome="Workflow transitions to active processing or next step",
-                        ),
-                        TestStepPlan(
-                            step_number=3,
-                            action="assert_visible",
-                            description="Confirm workflow status output updates visibly",
-                            target_hint="main, body, [role='status']",
-                            expected_outcome="Updated application state renders without selector timeout",
-                        ),
-                    ],
-                    expected_result="Core interactive workflow advances and updates DOM state reliably.",
-                )
-            )
 
         if objectives:
             for objective in objectives[:3]:
@@ -1204,7 +1673,7 @@ class PlannerAgent:
 
         return TestPlanResult(
             target_url=target_url,
-            summary=f"Generated {len(scenarios)} DOM-aware QA test scenarios for {target_url}.",
+            summary=f"Deterministic DOM-driven fallback generated {len(scenarios)} scenario(s) from discovered controls on {target_url}.",
             scenarios=scenarios,
             generated_by="deterministic_fallback",
         )
@@ -1214,10 +1683,18 @@ class PlannerAgent:
         target_url = state.get("target_url", "https://example.com")
         dom_summary = state.get("dom_summary") or state.get("dom_snapshot")
         objectives = state.get("objectives")
-        plan = self.create_test_plan(target_url=target_url, dom_summary=dom_summary, objectives=objectives)
+        result_state = self._graph.invoke(
+            {
+                "target_url": target_url,
+                "dom_summary": dom_summary,
+                "objectives": objectives or [],
+            }
+        )
+        plan = result_state["test_plan"]
         return {
             "target_url": plan.target_url,
             "test_plan": plan.model_dump(),
+            "planner_error": result_state.get("planner_error"),
             "current_agent": "planner",
         }
 
