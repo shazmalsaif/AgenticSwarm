@@ -47,30 +47,53 @@ _DEMO_STAGING_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-def _resolve_browser_executable() -> Optional[str]:
-    """Locate a local Chromium, Google Chrome, or Microsoft Edge executable for Playwright."""
-    candidates: list[Path] = []
+def _playwright_browser_dirs() -> list[Path]:
+    """Return candidate directories where Playwright stores cached browser binaries."""
+    dirs: list[Path] = []
     env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
     if env_path and env_path != "0":
-        candidates.append(Path(env_path))
+        dirs.append(Path(env_path))
+    dirs.append(Path("/ms-playwright"))
     local_app = os.getenv("LOCALAPPDATA", "").strip()
     if local_app:
-        candidates.append(Path(local_app) / "ms-playwright")
-    candidates.extend([Path.home() / ".cache" / "ms-playwright", Path.home() / "AppData" / "Local" / "ms-playwright"])
+        dirs.append(Path(local_app) / "ms-playwright")
+    dirs.extend([Path.home() / ".cache" / "ms-playwright", Path.home() / "AppData" / "Local" / "ms-playwright"])
+    return dirs
 
-    for base in candidates:
+
+def _find_bundled_chromium_executable() -> Optional[str]:
+    """Locate Playwright's own cached chromium / chromium_headless_shell executable if installed."""
+    for base in _playwright_browser_dirs():
         if not base.exists():
             continue
-        for sub in base.glob("chromium*"):
-            for rel in (
-                sub / "chrome-win" / "chrome.exe",
-                sub / "chrome-win64" / "chrome.exe",
-                sub / "chrome-linux" / "chrome",
-                sub / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
-            ):
-                if rel.exists():
-                    return str(rel)
+        for pat in ("chromium*", "chromium_headless_shell*"):
+            for sub in base.glob(pat):
+                for rel in (
+                    sub / "chrome-win" / "chrome.exe",
+                    sub / "chrome-win64" / "chrome.exe",
+                    sub / "chrome-linux" / "chrome",
+                    sub / "chrome-linux64" / "chrome",
+                    sub / "chrome-linux" / "headless_shell",
+                    sub / "chrome-linux64" / "headless_shell",
+                    sub / "chrome-headless-shell-linux64" / "chrome-headless-shell",
+                    sub / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
+                ):
+                    if rel.exists():
+                        return str(rel)
+    return None
 
+
+def _has_bundled_playwright_chromium() -> bool:
+    return _find_bundled_chromium_executable() is not None
+
+
+def _resolve_browser_executable() -> Optional[str]:
+    """Locate bundled Playwright Chromium or system Google Chrome / Microsoft Edge executable."""
+    bundled = _find_bundled_chromium_executable()
+    if bundled:
+        return bundled
+
+    local_app = os.getenv("LOCALAPPDATA", "").strip()
     system_browsers = [
         Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
         Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
@@ -89,20 +112,11 @@ def _resolve_browser_executable() -> Optional[str]:
 
 
 def _has_playwright_chromium() -> bool:
-    return _resolve_browser_executable() is not None
+    return _has_bundled_playwright_chromium() or _resolve_browser_executable() is not None
 
 
 def _has_playwright_ffmpeg() -> bool:
-    candidates: list[Path] = []
-    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if env_path and env_path != "0":
-        candidates.append(Path(env_path))
-    local_app = os.getenv("LOCALAPPDATA", "").strip()
-    if local_app:
-        candidates.append(Path(local_app) / "ms-playwright")
-    candidates.extend([Path.home() / ".cache" / "ms-playwright", Path.home() / "AppData" / "Local" / "ms-playwright"])
-
-    for base in candidates:
+    for base in _playwright_browser_dirs():
         if not base.exists():
             continue
         for sub in base.glob("ffmpeg*"):
@@ -113,13 +127,18 @@ def _has_playwright_ffmpeg() -> bool:
 
 
 def _launch_chromium(playwright_instance: Any, headless: bool = True) -> Any:
-    exe_path = _resolve_browser_executable()
+    args = ["--disable-blink-features=AutomationControlled"]
+    if os.name != "nt":
+        args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
+
     launch_kwargs: dict[str, Any] = {
         "headless": headless,
-        "args": ["--disable-blink-features=AutomationControlled"],
+        "args": args,
     }
-    if exe_path:
-        launch_kwargs["executable_path"] = exe_path
+    if not _has_bundled_playwright_chromium():
+        exe_path = _resolve_browser_executable()
+        if exe_path:
+            launch_kwargs["executable_path"] = exe_path
     return playwright_instance.chromium.launch(**launch_kwargs)
 
 

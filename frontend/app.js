@@ -4,9 +4,19 @@
  */
 
 // Dynamic Backend API Base URL detection
-const API_BASE_URL = (
-  window.location.origin && window.location.origin.startsWith('http') && !window.location.origin.includes(':5500')
-) ? window.location.origin : 'http://localhost:8000';
+const _EXPLICIT_API_URL = (typeof window.AGENTSWARM_API_URL === 'string')
+  ? window.AGENTSWARM_API_URL.trim().replace(/\/+$/, '')
+  : '';
+const _IS_LOCAL_FRONTEND = !window.location.origin
+  || !window.location.origin.startsWith('http')
+  || window.location.origin.includes('localhost')
+  || window.location.origin.includes('127.0.0.1');
+const API_BASE_URL = _EXPLICIT_API_URL
+  || (_IS_LOCAL_FRONTEND && !window.location.origin.includes(':8000')
+    ? 'http://localhost:8000'
+    : (window.location.origin && window.location.origin.startsWith('http')
+      ? window.location.origin
+      : 'http://localhost:8000'));
 
 /**
  * Robust formatter for API error details, converting arrays/objects to readable strings.
