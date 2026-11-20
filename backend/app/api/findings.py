@@ -14,6 +14,8 @@ from ..agent.triage_agent import FailureEvidence, TriageAgent
 router = APIRouter(prefix="/api/findings", tags=["Findings"])
 
 FindingCategory = Literal[
+    "NAVIGATION_MISSING",
+    "OVERLAY_BLOCKING",
     "SELECTOR_DRIFT",
     "BACKEND_API_ERROR",
     "NETWORK_TIMEOUT",
@@ -39,6 +41,8 @@ class FindingCreateRequest(BaseModel):
     console_errors: list[str] = Field(default_factory=list)
     network_failures: list[str] = Field(default_factory=list)
     dom_excerpt: Optional[str] = Field(None, description="HTML fragment around the failure state")
+    screenshot_b64: Optional[str] = Field(None, description="Captured failure screenshot data URL")
+    blocking_overlay: Optional[str] = Field(None, description="Visible blocking overlay detected at failure")
     action_description: Optional[str] = Field(None, description="Step intent when failure happened")
 
 
@@ -83,6 +87,8 @@ class FindingResponse(BaseModel):
     console_errors: list[str] = Field(default_factory=list)
     network_failures: list[str] = Field(default_factory=list)
     dom_excerpt: Optional[str] = None
+    screenshot_b64: Optional[str] = None
+    blocking_overlay: Optional[str] = None
     action_description: Optional[str] = None
     healing_patch: Optional[dict[str, Any]] = None
     status: FindingStatus
@@ -164,6 +170,8 @@ def record_finding_from_run(
         console_errors=list(ev.console_errors),
         network_failures=list(ev.network_failures),
         dom_excerpt=ev.dom_excerpt,
+        screenshot_b64=ev.screenshot_b64,
+        blocking_overlay=ev.blocking_overlay,
         action_description=ev.action_description,
         healing_patch=resolved_patch,
         status="healed" if resolved_patch is not None else "open",
@@ -219,6 +227,8 @@ def create_finding(payload: FindingCreateRequest) -> FindingResponse:
         console_errors=payload.console_errors,
         network_failures=payload.network_failures,
         dom_excerpt=payload.dom_excerpt,
+        screenshot_b64=payload.screenshot_b64,
+        blocking_overlay=payload.blocking_overlay,
         action_description=payload.action_description,
     )
     return record_finding_from_run(

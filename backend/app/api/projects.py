@@ -200,12 +200,15 @@ def generate_project_plan(
         )
         dom_summary = captured.get("dom_summary") or captured.get("dom_snapshot")
 
-    planner = PlannerAgent(provider=resolved_provider, model_name=resolved_model)
-    plan = planner.create_test_plan(
-        target_url=project.target_url,
-        dom_summary=dom_summary,
-        objectives=opts.objectives,
-    )
+    try:
+        planner = PlannerAgent(provider=resolved_provider, model_name=resolved_model)
+        plan = planner.create_test_plan(
+            target_url=project.target_url,
+            dom_summary=dom_summary,
+            objectives=opts.objectives,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     persona_agent = PersonaAgent(provider=resolved_provider, model_name=resolved_model)
     personas = persona_agent.generate_personas(

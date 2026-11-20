@@ -7,7 +7,6 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .planner_agent import invoke_with_model_fallback, resolve_chat_model
 
@@ -101,14 +100,22 @@ class PersonaAgent:
     @staticmethod
     def _extract_scenario_ids(test_plan: Optional[Any]) -> list[str]:
         if test_plan is None:
-            return ["SCN-001", "SCN-002", "SCN-003"]
+            return ["GOAL-01", "GOAL-02", "GOAL-03"]
         if isinstance(test_plan, dict):
+            goals = test_plan.get("goals") or []
+            ids = [g.get("goal_id") for g in goals if isinstance(g, dict) and g.get("goal_id")]
+            if ids:
+                return ids
             scenarios = test_plan.get("scenarios", [])
             ids = [s.get("scenario_id") for s in scenarios if isinstance(s, dict) and s.get("scenario_id")]
-            return ids or ["SCN-001"]
+            return ids or ["GOAL-01"]
+        goals = getattr(test_plan, "goals", None) or []
+        ids = [getattr(g, "goal_id", None) for g in goals if getattr(g, "goal_id", None)]
+        if ids:
+            return ids
         scenarios = getattr(test_plan, "scenarios", None) or []
         ids = [getattr(s, "scenario_id", None) for s in scenarios if getattr(s, "scenario_id", None)]
-        return ids or ["SCN-001"]
+        return ids or ["GOAL-01"]
 
     def _invoke_chain(self, prompt_input: dict[str, Any]) -> PersonaSuiteResult:
         result, resolved_model = invoke_with_model_fallback(

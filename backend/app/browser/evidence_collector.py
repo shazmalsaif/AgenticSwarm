@@ -157,13 +157,13 @@ class EvidenceCollector:
 
     @staticmethod
     def capture_screenshot_base64(page: Optional[Any] = None) -> Optional[str]:
-        """Safely capture a base64-encoded PNG screenshot from a Playwright page."""
+        """Safely capture a base64-encoded JPEG data URL screenshot from a Playwright page."""
         if page is None or not hasattr(page, "screenshot"):
             return None
         try:
-            raw = page.screenshot(type="png")
-            if isinstance(raw, (bytes, bytearray)):
-                return base64.b64encode(bytes(raw)).decode("ascii")
+            raw = page.screenshot(type="jpeg", quality=75)
+            if isinstance(raw, (bytes, bytearray)) and len(raw) > 0:
+                return "data:image/jpeg;base64," + base64.b64encode(bytes(raw)).decode("ascii")
         except Exception as exc:
             logger.debug("[EvidenceCollector] Screenshot capture skipped: %s", exc)
         return None
@@ -193,33 +193,53 @@ class EvidenceCollector:
         scenario_title: Optional[str] = None,
         step_number: Optional[int] = None,
         target_url: str = "",
+        current_url: Optional[str] = None,
         error_message: str,
         failed_selector: Optional[str] = None,
         http_status: Optional[int] = None,
         dom_excerpt: Optional[str] = None,
+        screenshot_b64: Optional[str] = None,
+        blocking_overlay: Optional[str] = None,
         action_description: Optional[str] = None,
         page: Optional[Any] = None,
         fallback_dom: Optional[str] = None,
     ) -> FailureEvidence:
-        """Build a validated FailureEvidence payload ready for TriageAgent and Findings API."""
+        """Build a validated FailureEvidence payload with live URL, overlay, screenshot, and DOM excerpt."""
         resolved_status = http_status if http_status is not None else self.last_http_status
+        live_page_url = str(getattr(page, "url", "")) if page is not None else ""
+        resolved_current_url = (current_url if current_url is not None else live_page_url) or target_url
+        resolved_overlay = blocking_overlay
+        if resolved_overlay is None and page is not None:
+            try:
+                from .browser_tools import BrowserToolkit
+
+                state = BrowserToolkit.extract_live_page_state(page, max_elements=10)
+                overlays = state.get("blocking_overlays") or []
+                if overlays:
+                    resolved_overlay = ", ".join(
+                        str(o.get("selector") or o.get("tag") or "overlay") for o in overlays
+                    )
+                if not dom_excerpt and state.get("dom_excerpt"):
+                    dom_excerpt = str(state["dom_excerpt"])
+            except Exception:
+                pass
         resolved_dom = dom_excerpt or self.extract_dom_excerpt(page=page, fallback_dom=fallback_dom)
-        resolved_url = (
-            target_url
-            or (str(getattr(page, "url", "") or "") if page is not None else "")
-        )
+        resolved_shot = screenshot_b64 or self.capture_screenshot_base64(page=page)
         return FailureEvidence(
             failure_id=failure_id,
             scenario_id=scenario_id,
             scenario_title=scenario_title,
             step_number=step_number,
-            target_url=resolved_url,
+            target_url=resolved_current_url or target_url,
+            current_url=resolved_current_url,
             error_message=error_message,
             failed_selector=failed_selector,
             http_status=resolved_status,
             console_errors=list(self.console_errors),
             network_failures=list(self.network_failures),
             dom_excerpt=resolved_dom,
+            screenshot_b64=resolved_shot,
+            blocking_overlay=resolved_overlay,
             action_description=action_description,
         )
 

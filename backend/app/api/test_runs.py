@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,12 @@ from pydantic import BaseModel, Field
 
 from ..agent.healing_agent import BrokenLocatorContext, HealingAgent, build_swarm_graph
 from ..agent.planner_agent import list_available_models, parse_provider_and_model
-from ..browser.playwright_runner import PlaywrightRunner
+from ..browser.playwright_runner import (
+    BrowserSession,
+    PlaywrightRunConfig,
+    PlaywrightRunner,
+    _has_playwright_chromium,
+)
 from ..browser.trace_manager import get_stream_manager, get_trace_manager
 from .findings import record_finding_from_run
 from .projects import _PROJECTS
@@ -30,16 +36,14 @@ class TestRunCreateRequest(BaseModel):
     project_id: Optional[str] = Field("proj-staging-demo", description="Target project ID")
     target_url: Optional[str] = Field(None, description="Override URL; defaults to project target_url when omitted")
     dom_summary: Optional[str] = Field(None, description="Optional DOM or route summary for planning")
-    dom_snapshot: Optional[str] = Field(None, description="Optional HTML snapshot for navigation and ARIA healing")
+    dom_snapshot: Optional[str] = Field(None, description="Optional HTML snapshot")
     objectives: list[str] = Field(default_factory=list, description="Explicit QA objectives")
     persona_count: int = Field(3, ge=1, le=8, description="Number of synthetic QA personas")
-    raw_failures: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Optional captured runtime failures to triage and heal during this run",
-    )
-    provider: Optional[str] = Field(None, description="Optional LangChain provider override (google_genai, openai, openrouter, deterministic)")
+    max_steps_per_goal: int = Field(15, ge=1, le=30, description="Max autonomous steps per goal")
+    raw_failures: list[dict[str, Any]] = Field(default_factory=list)
+    provider: Optional[str] = Field(None, description="Optional LangChain provider override")
     model_name: Optional[str] = Field(None, description="Optional LangChain model override")
-    use_live_browser: bool = Field(True, description="Fetch live site DOM and run Playwright browser")
+    use_live_browser: bool = Field(True, description="Run single continuous Chromium session across all goals")
     record_traces: bool = Field(True, description="Record execution traces and visual step frames")
     stream_id: Optional[str] = Field(None, description="Client stream ID for live SSE frame streaming")
 
@@ -53,6 +57,7 @@ class QuickHealRequest(BaseModel):
     accessible_name: Optional[str] = None
     element_text: Optional[str] = None
     dom_excerpt: Optional[str] = None
+    blocking_overlay: Optional[str] = None
     target_url: str = ""
     error_message: Optional[str] = None
     provider: Optional[str] = None
@@ -108,7 +113,6 @@ def _resolve_target_url(project_id: Optional[str], explicit_url: Optional[str]) 
 def _resolve_model_choice(provider: Optional[str], model_name: Optional[str]) -> tuple[str, str]:
     catalog = list_available_models()
     resolved_provider, resolved_model = parse_provider_and_model(provider, model_name)
-
     if not resolved_provider:
         resolved_provider = str(catalog["default_provider"])
     if not resolved_model:
@@ -131,43 +135,108 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
             run_id=run_id,
         )
 
+    swarm = build_swarm_graph(provider=resolved_provider, model_name=resolved_model)
     dom_snapshot = payload.dom_snapshot
     dom_summary = payload.dom_summary
-    if not dom_snapshot and not dom_summary:
-        captured = PlaywrightRunner().capture_dom_snapshot(
-            target_url=resolved_url,
-            use_live_browser=payload.use_live_browser,
-            stream_id=payload.stream_id,
-        )
-        dom_snapshot = captured.get("dom_snapshot")
-        dom_summary = captured.get("dom_summary") or dom_snapshot
-
-    swarm = build_swarm_graph(provider=resolved_provider, model_name=resolved_model)
-    initial_state: dict[str, Any] = {
-        "target_url": resolved_url,
-        "dom_summary": dom_summary or dom_snapshot,
-        "dom_snapshot": dom_snapshot or dom_summary,
-        "objectives": list(payload.objectives),
-        "persona_count": payload.persona_count,
-        "use_live_browser": payload.use_live_browser,
-        "record_traces": payload.record_traces,
-        "run_id": run_id,
-        "stream_id": payload.stream_id,
-    }
-    if payload.raw_failures:
-        initial_state["raw_failures"] = [dict(f) for f in payload.raw_failures]
-
+    session_video_url: Optional[str] = None
     try:
-        final_state = swarm.invoke(initial_state)
-    except Exception:
+        if payload.use_live_browser and _has_playwright_chromium() and "staging.store.nexus" not in resolved_url:
+            def _worker() -> tuple[dict[str, Any], Optional[str], Optional[str], Optional[str]]:
+                session = BrowserSession(
+                    target_url=resolved_url,
+                    run_id=run_id,
+                    stream_id=payload.stream_id,
+                    config=PlaywrightRunConfig(use_live_browser=True, record_traces=payload.record_traces),
+                )
+                initial_failures = [dict(f) for f in payload.raw_failures] if payload.raw_failures else []
+                live_snap = dom_snapshot
+                live_sum = dom_summary
+                state_out: dict[str, Any] = {}
+                try:
+                    try:
+                        session.start()
+                        live_state, compact_dom, _ = session.observe(force_refresh=True)
+                        live_snap = live_snap or str(live_state.get("dom_excerpt") or "")
+                        live_sum = live_sum or compact_dom
+                    except Exception as start_exc:
+                        if session.preflight_failure_evidence:
+                            initial_failures.append(session.preflight_failure_evidence)
+                        else:
+                            initial_failures.append(
+                                {
+                                    "failure_id": "SESSION-START-ERR",
+                                    "scenario_id": "PREFLIGHT",
+                                    "scenario_title": "Browser Session Startup",
+                                    "step_number": 1,
+                                    "target_url": resolved_url,
+                                    "current_url": str(getattr(session.page, "url", "") or "about:blank"),
+                                    "error_message": str(start_exc),
+                                    "blocking_overlay": "#intro-overlay" if "intro-overlay" in str(start_exc).lower() else None,
+                                }
+                            )
+
+                    initial_state: dict[str, Any] = {
+                        "target_url": resolved_url,
+                        "dom_summary": live_sum or live_snap,
+                        "dom_snapshot": live_snap or live_sum,
+                        "objectives": list(payload.objectives),
+                        "persona_count": payload.persona_count,
+                        "max_steps_per_goal": payload.max_steps_per_goal,
+                        "browser_session": session if session.page is not None else None,
+                        "use_live_browser": payload.use_live_browser,
+                        "record_traces": payload.record_traces,
+                        "run_id": run_id,
+                        "stream_id": payload.stream_id,
+                    }
+                    if initial_failures:
+                        initial_state["raw_failures"] = initial_failures
+                    state_out = swarm.invoke(initial_state)
+                finally:
+                    session.close()
+                    vid = session.video_url
+                    if vid and isinstance(state_out, dict):
+                        nav_res = state_out.get("navigation_results") or []
+                        if nav_res and isinstance(nav_res[0], dict):
+                            nav_res[0]["video_url"] = vid
+                return state_out, live_snap, live_sum, session.video_url
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                final_state, dom_snapshot, dom_summary, session_video_url = pool.submit(_worker).result(timeout=240.0)
+        else:
+            if not dom_snapshot and not dom_summary:
+                captured = PlaywrightRunner().capture_dom_snapshot(
+                    target_url=resolved_url,
+                    use_live_browser=payload.use_live_browser,
+                    stream_id=payload.stream_id,
+                )
+                dom_snapshot = captured.get("dom_snapshot")
+                dom_summary = captured.get("dom_summary") or dom_snapshot
+
+            initial_state = {
+                "target_url": resolved_url,
+                "dom_summary": dom_summary or dom_snapshot,
+                "dom_snapshot": dom_snapshot or dom_summary,
+                "objectives": list(payload.objectives),
+                "persona_count": payload.persona_count,
+                "max_steps_per_goal": payload.max_steps_per_goal,
+                "use_live_browser": False,
+                "record_traces": payload.record_traces,
+                "run_id": run_id,
+                "stream_id": payload.stream_id,
+            }
+            if payload.raw_failures:
+                initial_state["raw_failures"] = [dict(f) for f in payload.raw_failures]
+            final_state = swarm.invoke(initial_state)
+    except Exception as exc:
         if payload.stream_id:
+            stream_mgr.push_log(payload.stream_id, "Planner Agent", f"Execution aborted: {exc}", status="error")
             stream_mgr.complete_stream(
                 payload.stream_id,
                 run_id=run_id,
                 status="failed",
-                message="AgentSwarm execution failed.",
+                message=str(exc)[:220],
             )
-        raise
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     test_plan = final_state.get("test_plan") or {}
     personas = final_state.get("personas") or {}
@@ -184,21 +253,23 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
     for idx, failure in enumerate(raw_failures):
         diag = diagnoses[idx] if idx < len(diagnoses) else None
         fid = (diag or {}).get("failure_id") or failure.get("failure_id")
-        patch = suggestions_by_id.get(fid)
         recorded = record_finding_from_run(
             failure,
             project_id=payload.project_id,
             test_run_id=run_id,
             diagnosis=diag,
-            healing_patch=patch,
+            healing_patch=suggestions_by_id.get(fid),
         )
         finding_ids.append(recorded.id)
 
     failures_count = len(raw_failures)
     healed_count = len(suggestions)
-    if failures_count == 0:
+    has_unpassed_goal = any(
+        isinstance(nr, dict) and nr.get("overall_status") in ("failed", "stuck") for nr in navigation_results
+    )
+    if failures_count == 0 and not has_unpassed_goal:
         run_status: TestRunStatus = "passed"
-    elif healed_count > 0 and healed_count == failures_count:
+    elif healed_count > 0 and failures_count > 0 and healed_count == failures_count:
         run_status = "healed"
     else:
         run_status = "failed"
@@ -209,6 +280,8 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
         for nr in navigation_results
         if isinstance(nr, dict) and nr.get("video_url")
     ]
+    if session_video_url and session_video_url not in video_urls:
+        video_urls.append(session_video_url)
     for ta in trace_artifacts:
         if ta.get("video_url") and ta["video_url"] not in video_urls:
             video_urls.append(str(ta["video_url"]))
@@ -231,6 +304,7 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
     if plan_gen_by.startswith("langchain:") and ":" in plan_gen_by:
         actual_model = plan_gen_by.split(":", 1)[1].strip() or resolved_model
 
+    goals_list = test_plan.get("goals") or test_plan.get("scenarios") or []
     run_record = TestRunResponse(
         id=run_id,
         project_id=payload.project_id,
@@ -238,7 +312,7 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
         status=run_status,
         provider=resolved_provider,
         model_name=actual_model,
-        scenarios_count=len(test_plan.get("scenarios") or []),
+        scenarios_count=len(goals_list),
         personas_count=len(personas.get("personas") or []),
         failures_count=failures_count,
         healed_count=healed_count,
@@ -260,13 +334,11 @@ def _execute_swarm_run(payload: TestRunCreateRequest) -> TestRunResponse:
 
 @router.get("/models", summary="List Available AI Models")
 def get_available_models() -> dict[str, Any]:
-    """Return selectable LLM providers and models along with API key readiness."""
     return list_available_models()
 
 
 @router.get("/stream-state/{stream_id}", summary="Get Live Stream State")
 def get_live_stream_state(stream_id: str) -> dict[str, Any]:
-    """Poll current stage progress and streamed screenshot frames for an active or completed run."""
     state = get_stream_manager().get_state(stream_id)
     if state is None:
         return {
@@ -285,21 +357,18 @@ def get_live_stream_state(stream_id: str) -> dict[str, Any]:
 
 @router.get("/stream/{stream_id}", summary="Stream Live Browser Screenshots (SSE)")
 async def stream_test_run(stream_id: str):
-    """Server-Sent Events endpoint streaming live agent stages and browser step screenshots."""
-
     async def _event_generator():
         stream_mgr = get_stream_manager()
         cursor = 0
         idle_ticks = 0
-        while idle_ticks < 240:  # up to ~60s at 0.25s poll
+        while idle_ticks < 240:
             events, st_status = stream_mgr.get_events_since(stream_id, cursor)
             if events:
                 idle_ticks = 0
                 for ev in events:
                     cursor += 1
                     ev_type = ev.get("type", "message")
-                    payload_json = json.dumps(ev.get("data", {}))
-                    yield f"event: {ev_type}\ndata: {payload_json}\n\n"
+                    yield f"event: {ev_type}\ndata: {json.dumps(ev.get('data', {}))}\n\n"
                     if ev_type == "complete":
                         return
             else:
@@ -311,17 +380,12 @@ async def stream_test_run(stream_id: str):
     return StreamingResponse(
         _event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
 @router.get("/videos/{filename}", summary="Serve Recorded Browser Video")
 def get_recorded_video(filename: str):
-    """Serve a Playwright-recorded .webm video artifact safely by filename."""
     safe_name = Path(filename).name
     video_path = get_trace_manager().artifacts_dir / "videos" / safe_name
     if not video_path.exists() or not video_path.is_file():
@@ -334,7 +398,6 @@ def list_test_runs(
     project_id: Optional[str] = Query(None),
     run_status: Optional[TestRunStatus] = Query(None, alias="status"),
 ) -> list[TestRunResponse]:
-    """List executed swarm test runs, optionally filtered by project_id or status."""
     with _STORE_LOCK:
         items = list(_TEST_RUNS.values())
     if project_id:
@@ -346,13 +409,11 @@ def list_test_runs(
 
 @router.post("", response_model=TestRunResponse, status_code=status.HTTP_201_CREATED, summary="Execute AgentSwarm Run")
 def create_test_run(payload: TestRunCreateRequest) -> TestRunResponse:
-    """Launch the full LangGraph multi-agent swarm workflow and persist discovered findings."""
     return _execute_swarm_run(payload)
 
 
 @router.post("/heal-locator", summary="Synthesize Self-Healing Locator Patches")
 def quick_heal_locator(payload: QuickHealRequest) -> dict[str, Any]:
-    """Standalone endpoint invoking HealingAgent to synthesize Playwright, Cypress, and Selenium patches."""
     agent = HealingAgent(provider=payload.provider, model_name=payload.model_name)
     suggestion = agent.heal_locator(
         BrokenLocatorContext(
@@ -362,6 +423,7 @@ def quick_heal_locator(payload: QuickHealRequest) -> dict[str, Any]:
             accessible_name=payload.accessible_name,
             element_text=payload.element_text,
             dom_excerpt=payload.dom_excerpt,
+            blocking_overlay=payload.blocking_overlay,
             target_url=payload.target_url,
             error_message=payload.error_message,
         )
@@ -371,13 +433,11 @@ def quick_heal_locator(payload: QuickHealRequest) -> dict[str, Any]:
 
 @router.get("/{run_id}", response_model=TestRunResponse, summary="Get Test Run")
 def get_test_run(run_id: str) -> TestRunResponse:
-    """Retrieve complete results and artifacts of a specific test run."""
     return _get_or_404(run_id)
 
 
 @router.post("/{run_id}/rerun", response_model=TestRunResponse, status_code=status.HTTP_201_CREATED, summary="Re-run Test Run")
 def rerun_test_run(run_id: str) -> TestRunResponse:
-    """Re-execute an existing test run using its saved configuration."""
     existing = _get_or_404(run_id)
     replay_payload = TestRunCreateRequest.model_validate(existing.config_snapshot)
     return _execute_swarm_run(replay_payload)
@@ -385,7 +445,6 @@ def rerun_test_run(run_id: str) -> TestRunResponse:
 
 @router.delete("/{run_id}", summary="Delete Test Run")
 def delete_test_run(run_id: str) -> dict[str, Any]:
-    """Delete a test run record."""
     _get_or_404(run_id)
     with _STORE_LOCK:
         _TEST_RUNS.pop(run_id, None)
