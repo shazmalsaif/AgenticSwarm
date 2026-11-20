@@ -390,13 +390,34 @@ const AgentSwarm = {
         raw = (customEl?.value || '').trim();
       }
       if (!raw) return { provider: null, model_name: null };
+
+      const knownProviders = new Set([
+        'google_genai',
+        'google',
+        'gemini',
+        'openrouter',
+        'openai',
+        'deterministic',
+        'local',
+        'offline'
+      ]);
+
       if (raw.includes(':')) {
         const idx = raw.indexOf(':');
-        return {
-          provider: raw.slice(0, idx).trim() || null,
-          model_name: raw.slice(idx + 1).trim() || null
-        };
+        const prefix = raw.slice(0, idx).trim().toLowerCase();
+        const rest = raw.slice(idx + 1).trim();
+        if (knownProviders.has(prefix)) {
+          return {
+            provider: prefix || null,
+            model_name: rest || null
+          };
+        }
       }
+
+      if (raw.includes('/') || raw.endsWith(':free')) {
+        return { provider: 'openrouter', model_name: raw };
+      }
+
       return { provider: null, model_name: raw };
     },
 

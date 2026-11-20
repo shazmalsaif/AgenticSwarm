@@ -175,7 +175,12 @@
             </label>
             <select id="ws-model-select"
               class="w-full px-3 py-2 rounded-lg border border-border-hairline bg-white text-xs font-mono focus:outline-none focus:border-black">
-              <option value="google_genai:gemini-3.8-flash" selected>Gemini 3.8 Flash — Latest &amp; Recommended</option>
+              <option value="openrouter:openrouter/free" selected>OpenRouter Free • Auto Free Router (Recommended)</option>
+              <option value="openrouter:baidu/ernie-5.5-flash-preview:free">OpenRouter Free • Baidu ERNIE 5.5 Flash Preview</option>
+              <option value="openrouter:google/gemma-3-27b-it:free">OpenRouter Free • Gemma 3 27B IT</option>
+              <option value="openrouter:meta-llama/llama-3.3-70b-instruct:free">OpenRouter Free • Llama 3.3 70B Instruct</option>
+              <option value="openrouter:deepseek/deepseek-chat-v3-0324:free">OpenRouter Free • DeepSeek V3 0324</option>
+              <option value="google_genai:gemini-3.8-flash">Gemini 3.8 Flash — Latest &amp; Recommended</option>
               <option value="google_genai:gemini-3.8-pro">Gemini 3.8 Pro — Deep Reasoning</option>
               <option value="google_genai:gemini-2.5-flash">Gemini 2.5 Flash</option>
               <option value="google_genai:gemini-2.5-pro">Gemini 2.5 Pro</option>
@@ -187,7 +192,7 @@
               <option value="custom">Custom Model ID...</option>
             </select>
             <input id="ws-custom-model" type="text"
-              placeholder="provider:model-name (e.g. openrouter:meta-llama/llama-3.3-70b-instruct)"
+              placeholder="e.g. baidu/ernie-5.5-flash-preview:free or openrouter:model-id"
               class="hidden w-full px-3 py-1.5 rounded-lg border border-border-hairline bg-[#faf9f7] text-[11px] font-mono focus:outline-none focus:border-black">
           </div>
 

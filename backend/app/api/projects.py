@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..agent.persona_agent import PersonaAgent
-from ..agent.planner_agent import PlannerAgent, list_available_models
+from ..agent.planner_agent import PlannerAgent, list_available_models, parse_provider_and_model
 from ..browser.playwright_runner import PlaywrightRunner
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
@@ -186,12 +186,7 @@ def generate_project_plan(
     opts = payload or ProjectPlanPreviewRequest()
 
     catalog = list_available_models()
-    resolved_provider = (opts.provider or "").strip()
-    resolved_model = (opts.model_name or "").strip()
-    if resolved_model and not resolved_provider and ":" in resolved_model:
-        prefix, rest = resolved_model.split(":", 1)
-        resolved_provider = prefix.strip()
-        resolved_model = rest.strip()
+    resolved_provider, resolved_model = parse_provider_and_model(opts.provider, opts.model_name)
     if not resolved_provider:
         resolved_provider = str(catalog["default_provider"])
     if not resolved_model:

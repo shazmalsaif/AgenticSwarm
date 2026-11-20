@@ -94,6 +94,28 @@ def _has_playwright_chromium() -> bool:
     return _resolve_browser_executable() is not None
 
 
+def _has_playwright_ffmpeg() -> bool:
+    """Return True only if Playwright's ffmpeg binary for .webm recording exists on disk."""
+    candidates: list[Path] = []
+    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if env_path and env_path != "0":
+        candidates.append(Path(env_path))
+    local_app = os.getenv("LOCALAPPDATA", "").strip()
+    if local_app:
+        candidates.append(Path(local_app) / "ms-playwright")
+    candidates.append(Path.home() / ".cache" / "ms-playwright")
+    candidates.append(Path.home() / "AppData" / "Local" / "ms-playwright")
+
+    for base in candidates:
+        if not base.exists():
+            continue
+        for sub in base.glob("ffmpeg*"):
+            for fname in ("ffmpeg-win64.exe", "ffmpeg-win32.exe", "ffmpeg-linux", "ffmpeg-mac"):
+                if (sub / fname).exists():
+                    return True
+    return False
+
+
 def _launch_chromium(playwright_instance: Any, headless: bool = True) -> Any:
     """Launch Playwright Chromium using local cache or installed Chrome/Edge binary."""
     exe_path = _resolve_browser_executable()
@@ -534,8 +556,9 @@ class PlaywrightRunner:
                 from playwright.sync_api import sync_playwright
 
                 def _run_pw() -> NavigationRunResult:
+                    use_video = bool(cfg.record_video and _has_playwright_ffmpeg())
                     videos_dir = self.trace_manager.artifacts_dir / "videos"
-                    if cfg.record_video:
+                    if use_video:
                         videos_dir.mkdir(parents=True, exist_ok=True)
                     with sync_playwright() as p:
                         browser = _launch_chromium(p, headless=cfg.headless)
@@ -547,7 +570,7 @@ class PlaywrightRunner:
                                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
                                 ),
                             }
-                            if cfg.record_video:
+                            if use_video:
                                 ctx_kwargs["record_video_dir"] = str(videos_dir)
                                 ctx_kwargs["record_video_size"] = {
                                     "width": cfg.viewport_width,
@@ -567,9 +590,9 @@ class PlaywrightRunner:
                                 stream_id=stream_id,
                                 cfg=cfg,
                             )
-                            raw_video = getattr(live_page, "video", None)
+                            raw_video = getattr(live_page, "video", None) if use_video else None
                             context.close()
-                            if cfg.record_video and raw_video is not None:
+                            if use_video and raw_video is not None:
                                 try:
                                     src_path = Path(raw_video.path())
                                     if src_path.exists():

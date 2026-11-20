@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..agent.healing_agent import BrokenLocatorContext, HealingAgent, build_swarm_graph
-from ..agent.planner_agent import list_available_models
+from ..agent.planner_agent import list_available_models, parse_provider_and_model
 from ..browser.playwright_runner import PlaywrightRunner
 from ..browser.trace_manager import get_stream_manager, get_trace_manager
 from .findings import record_finding_from_run
@@ -107,13 +107,7 @@ def _resolve_target_url(project_id: Optional[str], explicit_url: Optional[str]) 
 
 def _resolve_model_choice(provider: Optional[str], model_name: Optional[str]) -> tuple[str, str]:
     catalog = list_available_models()
-    resolved_provider = (provider or "").strip()
-    resolved_model = (model_name or "").strip()
-
-    if resolved_model and not resolved_provider and ":" in resolved_model:
-        prefix, rest = resolved_model.split(":", 1)
-        resolved_provider = prefix.strip()
-        resolved_model = rest.strip()
+    resolved_provider, resolved_model = parse_provider_and_model(provider, model_name)
 
     if not resolved_provider:
         resolved_provider = str(catalog["default_provider"])
