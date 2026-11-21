@@ -7,12 +7,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Playwright's bundled Node driver links against libatomic.so.1, which is absent from python:3.11-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies first for better layer caching
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/backend/requirements.txt \
     && playwright install --with-deps chromium \
-    && chmod -R o+rx /ms-playwright
+    && chmod -R o+rx /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy application source
 COPY backend /app/backend

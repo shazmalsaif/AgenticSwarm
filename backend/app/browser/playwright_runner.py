@@ -129,7 +129,15 @@ def _has_playwright_ffmpeg() -> bool:
 def _launch_chromium(playwright_instance: Any, headless: bool = True) -> Any:
     args = ["--disable-blink-features=AutomationControlled"]
     if os.name != "nt":
-        args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
+        args.extend([
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=256",
+        ])
 
     launch_kwargs: dict[str, Any] = {
         "headless": headless,
