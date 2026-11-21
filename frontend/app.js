@@ -1345,16 +1345,30 @@ const AgentSwarm = {
       const text = document.getElementById('ws-health-text');
       if (!dot || !text) return;
 
-      try {
-        const res = await fetch(`${API_BASE_URL}/api/health`);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
-        const dbLabel = data.database === 'connected' ? 'DB Connected' : 'API Ready';
-        text.textContent = `Backend Online • ${dbLabel}`;
-      } catch (_) {
-        dot.className = 'w-2 h-2 rounded-full bg-red-500';
-        text.textContent = 'Backend Unreachable';
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/health`);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+          const dbLabel = data.database === 'connected' ? 'DB Connected' : 'API Ready';
+          text.textContent = `Backend Online • ${dbLabel}`;
+          if (attempt > 1) {
+            AgentSwarm.models.loadModels();
+            this.loadHistory();
+          }
+          return;
+        } catch (_) {
+          if (attempt < maxAttempts) {
+            dot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+            text.textContent = `Waking Backend... (${attempt}/${maxAttempts})`;
+            await new Promise((resolve) => setTimeout(resolve, 4000));
+          } else {
+            dot.className = 'w-2 h-2 rounded-full bg-red-500';
+            text.textContent = 'Backend Unreachable';
+          }
+        }
       }
     },
 
